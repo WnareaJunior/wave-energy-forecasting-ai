@@ -1,7 +1,3 @@
-Got it — here’s a **professional but “pre-launch” README** that incorporates your intended **UI features** and **AI development plan**, while clearly stating that the repo is in early development.
-
----
-
 # Panthalassa Buoy AI 🌊⚡
 
 **AI-powered ocean wave forecasting for renewable energy**
@@ -128,7 +124,7 @@ We welcome collaboration from those experienced in:
 
 ## 📜 License
 
-To be determined (likely MIT or Apache 2.0).
+MIT.
 
 ---
 
