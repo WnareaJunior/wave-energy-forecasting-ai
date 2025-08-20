@@ -1,0 +1,26 @@
+name: PR Build (Vite)
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+      - name: Install deps
+        run: npm ci --no-audit --no-fund
+      - name: Build
+        run: npm run build
+      # - name: Test
+      #   run: npm test
