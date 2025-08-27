@@ -12,6 +12,22 @@ This system aims to provide **real-time forecasts, spatial heatmaps, and histori
 This repository is **in early development**.
 The codebase will be built in stages following the AI roadmap below, with a future interactive dashboard to display predictions.
 
+## Current Data Stack
+**Historical (hindcast/reanalysis for training & seasonality)**
+
+* Global waves + winds: Copernicus WAVERYS (hourly, ~0.2°), ECMWF ERA5 (hourly, 0.36°).
+
+* Currents/SST: Copernicus/ERA5 ancillary layers.
+
+* Bathymetry: GEBCO/EMODnet (for nearshore wave transformation risk & mooring feasibility).
+
+**Live (monitoring & short-term prediction)**
+
+* Global wave forecasts: Copernicus global waves (3-hourly), NOAA WW3 (if needed).
+
+* Lightweight JSON for ops/API: Open-Meteo Marine; (optionally) StormGlass.
+
+* Truth for validation: NDBC/IOOS buoys (coastal), altimetry SWH (Jason/Sentinel) gridded daily; any partner/own buoys.
 ---
 
 ## 🎯 Planned Features
