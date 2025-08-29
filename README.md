@@ -1,7 +1,7 @@
 # Panthalassa Buoy AI 🌊⚡
 
 **AI-powered ocean wave forecasting for renewable energy**
-Panthalassa Buoy AI will use advanced machine learning and buoy sensor data to predict wave activity and identify optimal deployment sites for the **200-ft Panthalassa energy-harvesting buoy**.
+Panthalassa Buoy AI will use advanced machine learning trained on NOAA & Copernicus information systems to predict wave activity and identify optimal deployment sites for the **200-ft Panthalassa energy-harvesting buoy**.
 
 This system aims to provide **real-time forecasts, spatial heatmaps, and historical trend analysis** to maximize ocean energy capture potential.
 
