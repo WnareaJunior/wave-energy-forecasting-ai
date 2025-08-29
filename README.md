@@ -9,8 +9,23 @@ This system aims to provide **real-time forecasts, spatial heatmaps, and histori
 
 ## 🚧 Project Status
 
-This repository is **in early development**.
-The codebase will be built in stages following the AI roadmap below, with a future interactive dashboard to display predictions.
+This repository is **in early development**.  
+The codebase will be built in stages following the AI roadmap below, with a future interactive dashboard to display predictions.  
+
+### ✅ Current Progress
+- Implemented **wave power flux calculations** from cleaned Copernicus marine data.  
+- Aggregated to **monthly means** and derived **consistency metrics** (std dev, % above threshold, seasonal ratio).  
+- Built **revenue surface maps** and **top vs bottom site rankings**.  
+- Added baseline **forecasting models** (lag-1 regression) at best and worst sites.  
+- Produced **visualizations** (maps, tables, dual-axis charts) suitable for first deliverable/demo.  
+
+### 🔜 Next Steps
+- Extend forecasting with lag-2/3 and Random Forest baselines.  
+- Refactor notebook logic into modular Python functions.  
+- Package core functions into a **serverless API (AWS Lambda + FastAPI)**.  
+- Scale dataset handling (from 0.5 GB test set → 30–100 GB global data with Dask/S3).  
+- Develop a **front-end dashboard** to query and visualize forecasts interactively.  
+
 
 ## Current Data Stack
 **Historical (hindcast/reanalysis for training & seasonality)**
