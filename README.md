@@ -30,9 +30,9 @@ The codebase will be built in stages following the AI roadmap below, with a futu
 ## Current Data Stack
 **Historical (hindcast/reanalysis for training & seasonality)**
 
-* Global waves + winds: Copernicus WAVERYS (hourly, ~0.2°), ECMWF ERA5 (hourly, 0.36°).
+* Global waves + winds: Copernicus WAVERYS (hourly, ~0.2°), ECMWF ERA5 (hourly, 0.36°). (Currently implemented)
 
-* Currents/SST: Copernicus/ERA5 ancillary layers.
+* Currents/SST: Copernicus/ERA5 ancillary layers. 
 
 * Bathymetry: GEBCO/EMODnet (for nearshore wave transformation risk & mooring feasibility).
 
