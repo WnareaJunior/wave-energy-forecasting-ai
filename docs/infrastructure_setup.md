@@ -10,7 +10,7 @@
 ### EC2 Instances
 
 **Copernicus Data Downloader**
-- Instance Type: t3.medium
+- Instance Type: t3.large-flex
 - Region: us-east-2
 - Purpose: Download 30GB Copernicus Marine dataset
 - Dataset: cmems_mod_glo_wav_my_0.2deg_PT3H-i
@@ -18,7 +18,7 @@
 - Status: Active download (~1 day completion)
 
 **NOAA Data Processor** 
-- Instance Type: t3.medium
+- Instance Type: t3.large-flex
 - Region: us-east-2
 - Purpose: Process NOAA Wave Ensemble Reforecast data
 - Source: noaa-nws-gefswaves-reforecast-pds bucket
@@ -30,10 +30,10 @@
 - Task Definition: panthalassa-copernicus-task
 - Container: copernicusmarine/copernicusmarine:latest
 - Environment Variables: COPERNICUSMARINE_SERVICE_USERNAME, COPERNICUSMARINE_SERVICE_PASSWORD
-- Status: Working but moved to EC2 for better performance
+- Status: Not suitable for Copernicus data access. The Copernicus API requires stateful credentials and an interactive CLI, which Fargate cannot support for streaming or programmatic access.
 
 ## Data Pipeline Flow
-1. Raw data sources → S3 raw-data bucket
+1. EC2 data access & streaming → S3 raw-data bucket
 2. EC2 processing → S3 processed bucket  
 3. Analysis/modeling → S3 results bucket
 
@@ -43,7 +43,7 @@
 - NOAA: Public bucket, no authentication required
 
 ## Technical Decisions Made
-- **EC2 over Lambda**: 30GB+ datasets exceed Lambda limitations
+- **EC2 over Lambda**: 30GB+ datasets exceed Lambda limitations and does not support the 150 mb + copernicusmarine library required to access datasets
 - **EC2 over ECS**: Simpler deployment, faster iteration for data downloads
 - **Parallel processing**: Separate instances for Copernicus vs NOAA data
 - **S3 as central storage**: Enables multiple processing approaches
