@@ -274,7 +274,7 @@
                                     <li><a href="#dashboard">Dashboard</a></li>
                                     <li><a href="#results">Results</a></li>
                                     <li><a href="#contact">Contact</a></li>
-                                    <li><a href="https://github.com/WnareaJunior/wave-energy-forecasting-ai" target="_blank">GitHub</a></li>
+                                    <li><a href="https://github.com/wilsondev27/panthalassa" target="_blank">GitHub</a></li>
                                 </ul>
                             </nav>
                         </div>
@@ -379,35 +379,87 @@
                             
                             <div className="charts-grid">
                                 <div className="chart-card">
-                                    <h3>Wave Power Flux Heatmap</h3>
-                                    <div className="chart-placeholder">
-                                        [Replace with your heatmap image]<br/>
-                                        Pacific Northwest Wave Energy Distribution
-                                    </div>
+                                    <h3>Revenue Surface Map (3-Year Average)</h3>
+                                    <img src="images/revenue_surface_map.png" alt="Revenue Surface Map" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        Pacific Northwest revenue potential distribution showing optimal deployment zones
+                                    </p>
                                 </div>
                                 
                                 <div className="chart-card">
-                                    <h3>Temporal Wave Power Trends</h3>
-                                    <div className="chart-placeholder">
-                                        [Replace with your time series chart]<br/>
-                                        Monthly Power Flux Variations
-                                    </div>
+                                    <h3>Best vs Worst Site Heatmap</h3>
+                                    <img src="images/best_worst_sites_heatmap.png" alt="Best vs Worst Sites" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        Spatial comparison of highest and lowest wave energy potential sites
+                                    </p>
                                 </div>
                                 
                                 <div className="chart-card">
-                                    <h3>Model Performance Comparison</h3>
-                                    <div className="chart-placeholder">
-                                        [Replace with your model comparison chart]<br/>
-                                        Lag-1 Regression vs Baseline Performance
-                                    </div>
+                                    <h3>Top 10 Offshore Sites Revenue</h3>
+                                    <img src="images/top_10_sites_revenue.png" alt="Top 10 Sites" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        Highest revenue potential sites with estimated annual earnings
+                                    </p>
                                 </div>
                                 
                                 <div className="chart-card">
-                                    <h3>Site Ranking Analysis</h3>
-                                    <div className="chart-placeholder">
-                                        [Replace with your site ranking visualization]<br/>
-                                        Top Wave Energy Sites by Power Potential
-                                    </div>
+                                    <h3>Revenue vs Reliability Analysis</h3>
+                                    <img src="images/revenue_vs_reliability.png" alt="Revenue vs Reliability" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        Histogram comparison showing trade-offs between revenue and consistency
+                                    </p>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Wave Energy Potential Map</h3>
+                                    <img src="images/wave_energy_potential.png" alt="Wave Energy Potential" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        3-year mean wave energy distribution across Pacific Northwest region
+                                    </p>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Bottom 10 Sites Analysis</h3>
+                                    <img src="images/bottom_10_sites_revenue.png" alt="Bottom 10 Sites" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        Lowest performing sites for deployment risk assessment
+                                    </p>
+                                </div>
+                            </div>
+                            
+                            <h2 className="section-title" style={{marginTop: '4rem'}}>Forecasting Model Performance</h2>
+                            
+                            <div className="charts-grid">
+                                <div className="chart-card">
+                                    <h3>Best Site: Observed vs Predicted</h3>
+                                    <img src="images/best_site_forecast_comparison.png" alt="Best Site Forecast" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        1-month ahead forecast accuracy at highest potential grid cell
+                                    </p>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Worst Site: Observed vs Predicted</h3>
+                                    <img src="images/worst_site_forecast_comparison.png" alt="Worst Site Forecast" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        1-month ahead forecast validation at lowest potential grid cell
+                                    </p>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Monthly Power Flux: Best vs Worst</h3>
+                                    <img src="images/monthly_power_flux_comparison.png" alt="Monthly Power Comparison" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        Seasonal power variation between optimal and suboptimal sites
+                                    </p>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Best Site Monthly Trends</h3>
+                                    <img src="images/best_site_monthly_power.png" alt="Best Site Monthly" style={{width: '100%', height: '280px', objectFit: 'contain', borderRadius: '8px', backgroundColor: 'rgba(255,255,255,0.1)'}} />
+                                    <p style={{fontSize: '0.9rem', opacity: '0.8', marginTop: '0.5rem'}}>
+                                        Detailed monthly power flux analysis at top-ranked deployment site
+                                    </p>
                                 </div>
                             </div>
                         </section>
@@ -446,7 +498,7 @@
                     <footer className="footer" id="contact">
                         <div className="container">
                             <div className="footer-links">
-                                <a href="https://github.com/WnareaJunior/wave-energy-forecasting-ai" target="_blank" className="btn btn-secondary">
+                                <a href="https://github.com/WnareaJunior" target="_blank" className="btn btn-secondary">
                                     View Code on GitHub
                                 </a>
                                 <a href="mailto:wilsondev27@outlook.com" className="btn">
