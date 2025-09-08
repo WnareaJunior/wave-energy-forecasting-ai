@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panthalassa Ocean Forecasting</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%);
+            color: white;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        
+        .header {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            padding: 1rem 0;
+            margin-bottom: 2rem;
+        }
+        
+        .nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #60a5fa;
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 2rem;
+            list-style: none;
+        }
+        
+        .nav-links a {
+            color: white;
+            text-decoration: none;
+            transition: color 0.3s;
+        }
+        
+        .nav-links a:hover {
+            color: #60a5fa;
+        }
+        
+        .hero {
+            text-align: center;
+            padding: 3rem 0;
+            margin-bottom: 3rem;
+        }
+        
+        .hero h1 {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #60a5fa, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .hero p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+        
+        .status-card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 12px;
+            padding: 2rem;
+            transition: transform 0.3s;
+        }
+        
+        .status-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .card-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 1rem;
+            color: #60a5fa;
+        }
+        
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+        
+        .metric-value {
+            font-weight: bold;
+            color: #34d399;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 0.5rem 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #34d399, #10b981);
+            transition: width 0.3s;
+        }
+        
+        .charts-section {
+            margin: 3rem 0;
+        }
+        
+        .section-title {
+            font-size: 2rem;
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+        
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 2rem;
+        }
+        
+        .chart-card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 12px;
+            padding: 2rem;
+        }
+        
+        .chart-placeholder {
+            width: 100%;
+            height: 300px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px dashed rgba(255, 255, 255, 0.3);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.9rem;
+            color: rgba(255, 255, 255, 0.7);
+        }
+        
+        .performance-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin: 2rem 0;
+        }
+        
+        .metric-card {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-align: center;
+        }
+        
+        .metric-number {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #34d399;
+        }
+        
+        .metric-label {
+            font-size: 0.9rem;
+            opacity: 0.8;
+            margin-top: 0.5rem;
+        }
+        
+        .footer {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 2rem 0;
+            margin-top: 4rem;
+            text-align: center;
+        }
+        
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 2rem;
+            margin-bottom: 1rem;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            text-decoration: none;
+            font-weight: bold;
+            transition: transform 0.3s;
+            display: inline-block;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+        
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2rem;
+            }
+            
+            .nav-links {
+                gap: 1rem;
+            }
+            
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        
+        function App() {
+            const [dataProgress, setDataProgress] = useState({
+                copernicus: 75,
+                noaa: 90,
+                processing: 60
+            });
+            
+            return (
+                <div>
+                    <header className="header">
+                        <div className="container">
+                            <nav className="nav">
+                                <div className="logo">🌊 Panthalassa AI</div>
+                                <ul className="nav-links">
+                                    <li><a href="#dashboard">Dashboard</a></li>
+                                    <li><a href="#results">Results</a></li>
+                                    <li><a href="#contact">Contact</a></li>
+                                    <li><a href="https://github.com/WnareaJunior/wave-energy-forecasting-ai" target="_blank">GitHub</a></li>
+                                </ul>
+                            </nav>
+                        </div>
+                    </header>
+                    
+                    <main className="container">
+                        <section className="hero">
+                            <h1>Ocean Wave Forecasting AI</h1>
+                            <p>Advanced machine learning for renewable energy site assessment using Copernicus Marine and NOAA datasets</p>
+                        </section>
+                        
+                        <section className="status-grid">
+                            <div className="status-card">
+                                <div className="card-title">Data Pipeline Status</div>
+                                <div className="metric">
+                                    <span>Copernicus Marine Data</span>
+                                    <span className="metric-value">~30GB</span>
+                                </div>
+                                <div className="progress-bar">
+                                    <div className="progress-fill" style={{width: `${dataProgress.copernicus}%`}}></div>
+                                </div>
+                                
+                                <div className="metric">
+                                    <span>NOAA Reforecast Data</span>
+                                    <span className="metric-value">~30GB</span>
+                                </div>
+                                <div className="progress-bar">
+                                    <div className="progress-fill" style={{width: `${dataProgress.noaa}%`}}></div>
+                                </div>
+                                
+                                <div className="metric">
+                                    <span>Processing Pipeline</span>
+                                    <span className="metric-value">Active</span>
+                                </div>
+                                <div className="progress-bar">
+                                    <div className="progress-fill" style={{width: `${dataProgress.processing}%`}}></div>
+                                </div>
+                            </div>
+                            
+                            <div className="status-card">
+                                <div className="card-title">Infrastructure</div>
+                                <div className="metric">
+                                    <span>AWS Region</span>
+                                    <span className="metric-value">us-east-2</span>
+                                </div>
+                                <div className="metric">
+                                    <span>EC2 Instances</span>
+                                    <span className="metric-value">2 Active</span>
+                                </div>
+                                <div className="metric">
+                                    <span>S3 Storage</span>
+                                    <span className="metric-value">60GB+</span>
+                                </div>
+                                <div className="metric">
+                                    <span>Uptime</span>
+                                    <span className="metric-value">149+ hours</span>
+                                </div>
+                            </div>
+                            
+                            <div className="status-card">
+                                <div className="card-title">Geographic Coverage</div>
+                                <div className="metric">
+                                    <span>Region</span>
+                                    <span className="metric-value">Pacific Northwest</span>
+                                </div>
+                                <div className="metric">
+                                    <span>Longitude</span>
+                                    <span className="metric-value">-130° to -124°W</span>
+                                </div>
+                                <div className="metric">
+                                    <span>Latitude</span>
+                                    <span className="metric-value">46° to 50.5°N</span>
+                                </div>
+                                <div className="metric">
+                                    <span>Resolution</span>
+                                    <span className="metric-value">0.2° (~22km)</span>
+                                </div>
+                            </div>
+                        </section>
+                        
+                        <section className="charts-section" id="results">
+                            <h2 className="section-title">Wave Power Analysis Results</h2>
+                            
+                            <div className="performance-metrics">
+                                <div className="metric-card">
+                                    <div className="metric-number">8.5%</div>
+                                    <div className="metric-label">RMSE Improvement</div>
+                                </div>
+                                <div className="metric-card">
+                                    <div className="metric-number">12.3</div>
+                                    <div className="metric-label">Average Power (kW/m)</div>
+                                </div>
+                                <div className="metric-card">
+                                    <div className="metric-number">95.2%</div>
+                                    <div className="metric-label">Data Quality</div>
+                                </div>
+                                <div className="metric-card">
+                                    <div className="metric-number">3.2</div>
+                                    <div className="metric-label">Seasonal Ratio</div>
+                                </div>
+                            </div>
+                            
+                            <div className="charts-grid">
+                                <div className="chart-card">
+                                    <h3>Wave Power Flux Heatmap</h3>
+                                    <div className="chart-placeholder">
+                                        [Replace with your heatmap image]<br/>
+                                        Pacific Northwest Wave Energy Distribution
+                                    </div>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Temporal Wave Power Trends</h3>
+                                    <div className="chart-placeholder">
+                                        [Replace with your time series chart]<br/>
+                                        Monthly Power Flux Variations
+                                    </div>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Model Performance Comparison</h3>
+                                    <div className="chart-placeholder">
+                                        [Replace with your model comparison chart]<br/>
+                                        Lag-1 Regression vs Baseline Performance
+                                    </div>
+                                </div>
+                                
+                                <div className="chart-card">
+                                    <h3>Site Ranking Analysis</h3>
+                                    <div className="chart-placeholder">
+                                        [Replace with your site ranking visualization]<br/>
+                                        Top Wave Energy Sites by Power Potential
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+                        
+                        <section className="status-card" style={{marginTop: '3rem'}}>
+                            <div className="card-title">Technical Implementation</div>
+                            <p style={{marginBottom: '1rem'}}>
+                                Built on AWS cloud infrastructure with EC2-based processing cluster handling 60GB+ of oceanographic datasets. 
+                                Wave power flux calculations use validated physics formulas (P = ρg²H²T/64π) applied to Copernicus satellite 
+                                observations and NOAA 20-year reforecast models.
+                            </p>
+                            <p style={{marginBottom: '1rem'}}>
+                                Machine learning pipeline includes baseline lag-1 regression models with 8.5% RMSE improvement over persistence 
+                                forecasting. Advanced ensemble methods and neural networks in development for Phase 2 deployment.
+                            </p>
+                            <div style={{display: 'flex', gap: '1rem', flexWrap: 'wrap'}}>
+                                <span style={{background: 'rgba(59, 130, 246, 0.3)', padding: '0.5rem 1rem', borderRadius: '20px', fontSize: '0.9rem'}}>
+                                    AWS EC2/S3
+                                </span>
+                                <span style={{background: 'rgba(59, 130, 246, 0.3)', padding: '0.5rem 1rem', borderRadius: '20px', fontSize: '0.9rem'}}>
+                                    Python/xarray
+                                </span>
+                                <span style={{background: 'rgba(59, 130, 246, 0.3)', padding: '0.5rem 1rem', borderRadius: '20px', fontSize: '0.9rem'}}>
+                                    Copernicus Marine
+                                </span>
+                                <span style={{background: 'rgba(59, 130, 246, 0.3)', padding: '0.5rem 1rem', borderRadius: '20px', fontSize: '0.9rem'}}>
+                                    NOAA WAVEWATCH III
+                                </span>
+                                <span style={{background: 'rgba(59, 130, 246, 0.3)', padding: '0.5rem 1rem', borderRadius: '20px', fontSize: '0.9rem'}}>
+                                    Machine Learning
+                                </span>
+                            </div>
+                        </section>
+                    </main>
+                    
+                    <footer className="footer" id="contact">
+                        <div className="container">
+                            <div className="footer-links">
+                                <a href="https://github.com/WnareaJunior/wave-energy-forecasting-ai" target="_blank" className="btn btn-secondary">
+                                    View Code on GitHub
+                                </a>
+                                <a href="mailto:wilsondev27@outlook.com" className="btn">
+                                    Contact Developer
+                                </a>
+                            </div>
+                            <p style={{opacity: '0.8', fontSize: '0.9rem'}}>
+                                Wilson Rodriguez • Ocean Energy Forecasting Research • 2025
+                            </p>
+                        </div>
+                    </footer>
+                </div>
+            );
+        }
+        
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
