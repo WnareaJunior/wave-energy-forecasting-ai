@@ -39,9 +39,11 @@ YEARS = range(2000, 2020)
 MEMBERS = ["c00"]  # control only; perturbed members (p01-p04) can be
                    # backfilled later — resume logic won't re-fetch c00.
 
-# Wave-energy core set: significant height, peak period/direction,
-# integrated mean wave frequency (for mean period), and 10 m wind.
-VARIABLES = {"HTSGW", "PERPW", "DIRPW", "IMWF", "UGRD", "VGRD"}
+# Wave-energy feature set: significant height, peak period/direction,
+# integrated mean wave frequency (for mean period), swell partitions,
+# wind-sea height, and 10 m wind.
+VARIABLES = {"HTSGW", "PERPW", "DIRPW", "IMWF", "SWELL", "WVHGT",
+             "UGRD", "VGRD"}
 
 # Pacific Northwest study region (Washington coast and approaches).
 # Source grid longitude runs 0..360 east, latitude descends 90..-90.

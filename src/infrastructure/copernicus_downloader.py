@@ -1,5 +1,5 @@
-"""Download the Copernicus Marine global wave hindcast for the Japan /
-Western Pacific region in monthly chunks and upload each chunk to S3.
+"""Download the Copernicus Marine global wave hindcast for a study region
+in monthly chunks and upload each chunk to S3.
 
 Resume state is derived from the S3 bucket itself (no local log file): any
 chunk whose .nc object already exists under the destination prefix is
@@ -12,9 +12,8 @@ Credentials:
   - AWS: default boto3 credential chain (IAM instance role on EC2).
 
 Usage:
-  python copernicus_downloader.py --dry-run    # show resume state only
-  python copernicus_downloader.py              # download remaining chunks
-  python copernicus_downloader.py --workers 3  # parallel chunk downloads
+  python copernicus_downloader.py --region pnw --dry-run
+  python copernicus_downloader.py --region japan --workers 3
 """
 
 import argparse
@@ -29,12 +28,22 @@ import boto3
 # ---- CONFIG ----
 DATASET_ID = "cmems_mod_glo_wav_my_0.2deg_PT3H-i"
 BUCKET_NAME = "panthalassa-ocean-raw-data"
-S3_PREFIX = "copernicus-data"
 LOCAL_TEMP_DIR = "./temp_downloads"
 
-# Spatial bounds: Japan / Western Pacific
-MIN_LON, MAX_LON = 124.52, 144.6
-MIN_LAT, MAX_LAT = 16.745, 48.185
+REGIONS = {
+    # Original study region; prefix layout predates multi-region support.
+    "japan": {
+        "lon": (124.52, 144.6),
+        "lat": (16.745, 48.185),
+        "prefix": "copernicus-data",
+    },
+    # Pacific Northwest / Washington coast — the long-term study region.
+    "pnw": {
+        "lon": (-130.0, -124.0),
+        "lat": (46.0, 50.5),
+        "prefix": "copernicus-data-pnw",
+    },
+}
 
 # Full temporal range of the multi-year (reprocessed) product
 START_DATE = datetime(1980, 1, 1, 21)
@@ -68,15 +77,16 @@ def chunk_name(chunk_start, chunk_end):
     return f"{chunk_start.strftime('%Y%m%d')}_{chunk_end.strftime('%Y%m%d')}"
 
 
-def s3_key(chunk_start, name):
-    return f"{S3_PREFIX}/{chunk_start.year}/{name}.nc"
+def s3_key(region, chunk_start, name):
+    return f"{region['prefix']}/{chunk_start.year}/{name}.nc"
 
 
-def completed_chunks_from_s3(s3):
+def completed_chunks_from_s3(s3, region):
     """Return the set of chunk names that already exist in the bucket."""
     completed = set()
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=f"{S3_PREFIX}/"):
+    for page in paginator.paginate(Bucket=BUCKET_NAME,
+                                   Prefix=f"{region['prefix']}/"):
         for obj in page.get("Contents", []):
             basename = obj["Key"].rsplit("/", 1)[-1]
             if basename.endswith(".nc") and obj["Size"] > 0:
@@ -96,7 +106,7 @@ def retry(func, *args, max_attempts=3, base_delay=15, **kwargs):
             time.sleep(delay)
 
 
-def download_chunk(name, chunk_start, request_end):
+def download_chunk(region, name, chunk_start, request_end):
     # Imported here so --dry-run works on machines without copernicusmarine.
     import copernicusmarine
 
@@ -106,10 +116,10 @@ def download_chunk(name, chunk_start, request_end):
         dataset_id=DATASET_ID,
         start_datetime=chunk_start.replace(tzinfo=timezone.utc),
         end_datetime=request_end.replace(tzinfo=timezone.utc),
-        minimum_longitude=MIN_LON,
-        maximum_longitude=MAX_LON,
-        minimum_latitude=MIN_LAT,
-        maximum_latitude=MAX_LAT,
+        minimum_longitude=region["lon"][0],
+        maximum_longitude=region["lon"][1],
+        minimum_latitude=region["lat"][0],
+        maximum_latitude=region["lat"][1],
         output_directory=LOCAL_TEMP_DIR,
         output_filename=f"{name}.nc",
         overwrite=True,
@@ -118,16 +128,16 @@ def download_chunk(name, chunk_start, request_end):
     return os.path.join(LOCAL_TEMP_DIR, f"{name}.nc")
 
 
-def process_chunk(s3, chunk_start, chunk_end, is_last):
+def process_chunk(s3, region, chunk_start, chunk_end, is_last):
     name = chunk_name(chunk_start, chunk_end)
     # Trim one timestep except on the final chunk, whose end is the real
     # end of the record rather than the start of a following chunk.
     request_end = chunk_end if is_last else chunk_end - TIME_STEP
-    key = s3_key(chunk_start, name)
+    key = s3_key(region, chunk_start, name)
     temp_file = None
     try:
         log.info("Downloading %s (%s -> %s)", name, chunk_start, request_end)
-        temp_file = retry(download_chunk, name, chunk_start, request_end)
+        temp_file = retry(download_chunk, region, name, chunk_start, request_end)
         log.info("Uploading %s to s3://%s/%s", name, BUCKET_NAME, key)
         retry(s3.upload_file, temp_file, BUCKET_NAME, key)
         log.info("Chunk %s complete", name)
@@ -138,6 +148,8 @@ def process_chunk(s3, chunk_start, chunk_end, is_last):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--region", choices=sorted(REGIONS), default="japan",
+                        help="study region preset (default japan)")
     parser.add_argument("--dry-run", action="store_true",
                         help="report resume state without downloading")
     parser.add_argument("--workers", type=int, default=2,
@@ -150,15 +162,17 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
 
+    region = REGIONS[args.region]
     s3 = boto3.client("s3")
-    completed = completed_chunks_from_s3(s3)
+    completed = completed_chunks_from_s3(s3, region)
 
     all_chunks = list(generate_chunks(START_DATE, END_DATE))
     pending = [(cs, ce) for cs, ce in all_chunks
                if chunk_name(cs, ce) not in completed]
 
-    log.info("%d chunks total, %d already in S3, %d pending",
-             len(all_chunks), len(all_chunks) - len(pending), len(pending))
+    log.info("[%s] %d chunks total, %d already in S3, %d pending",
+             args.region, len(all_chunks), len(all_chunks) - len(pending),
+             len(pending))
     if pending:
         log.info("Resume point: %s", pending[0][0])
     if args.dry_run or not pending:
@@ -171,7 +185,8 @@ def main():
     failures = []
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(process_chunk, s3, cs, ce, cs == last_start): (cs, ce)
+            pool.submit(process_chunk, s3, region, cs, ce, cs == last_start):
+                (cs, ce)
             for cs, ce in pending
         }
         for future in as_completed(futures):
