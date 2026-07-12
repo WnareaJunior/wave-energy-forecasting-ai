@@ -1,42 +1,58 @@
+"""Download the Copernicus Marine global wave hindcast for the Japan /
+Western Pacific region in monthly chunks and upload each chunk to S3.
+
+Resume state is derived from the S3 bucket itself (no local log file): any
+chunk whose .nc object already exists under the destination prefix is
+skipped, so the script can be killed and restarted — or moved to a fresh
+EC2 instance — at any point without losing progress.
+
+Credentials:
+  - Copernicus: COPERNICUSMARINE_SERVICE_USERNAME / _PASSWORD env vars,
+    or a prior `copernicusmarine login` on this machine.
+  - AWS: default boto3 credential chain (IAM instance role on EC2).
+
+Usage:
+  python copernicus_downloader.py --dry-run    # show resume state only
+  python copernicus_downloader.py              # download remaining chunks
+  python copernicus_downloader.py --workers 3  # parallel chunk downloads
+"""
+
+import argparse
+import logging
 import os
-import json
 import time
-from datetime import datetime, timedelta
-import copernicusmarine
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+
 import boto3
-from dask.diagnostics import ProgressBar
 
 # ---- CONFIG ----
-dataset_id = "cmems_mod_glo_wav_my_0.2deg_PT3H-i"
-bucket_name = "panthalassa-ocean-raw-data"
-local_temp_dir = "./temp_downloads"
-log_file = "./download_log.json"
-os.makedirs(local_temp_dir, exist_ok=True)
+DATASET_ID = "cmems_mod_glo_wav_my_0.2deg_PT3H-i"
+BUCKET_NAME = "panthalassa-ocean-raw-data"
+S3_PREFIX = "copernicus-data"
+LOCAL_TEMP_DIR = "./temp_downloads"
 
-# AWS S3 client
-s3 = boto3.client('s3')
+# Spatial bounds: Japan / Western Pacific
+MIN_LON, MAX_LON = 124.52, 144.6
+MIN_LAT, MAX_LAT = 16.745, 48.185
 
-# Spatial bounds
-min_lon, max_lon = 124.52, 144.6
-min_lat, max_lat = 16.745, 48.185
+# Full temporal range of the multi-year (reprocessed) product
+START_DATE = datetime(1980, 1, 1, 21)
+END_DATE = datetime(2023, 4, 30, 21)
 
-# Full temporal range
-start_date = datetime(1980, 1, 1, 21)
-end_date   = datetime(2023, 4, 30, 21)
+# The dataset is 3-hourly; trimming this off each chunk's end avoids
+# duplicating the boundary timestep that also starts the next chunk.
+TIME_STEP = timedelta(hours=3)
 
-# ---- Logging ----
-if os.path.exists(log_file):
-    with open(log_file, "r") as f:
-        completed_chunks = json.load(f)
-else:
-    completed_chunks = []
+log = logging.getLogger("copernicus_downloader")
 
-def save_log():
-    with open(log_file, "w") as f:
-        json.dump(completed_chunks, f, indent=2)
 
-# ---- Helper: generate 1-month chunks ----
 def generate_chunks(start, end):
+    """Yield (chunk_start, chunk_end) monthly pairs.
+
+    Boundary arithmetic must stay identical to the original 2025 run so
+    that generated chunk names match the .nc files already in S3.
+    """
     current = start
     while current < end:
         month = current.month % 12 + 1
@@ -47,59 +63,132 @@ def generate_chunks(start, end):
         yield current, next_chunk
         current = next_chunk
 
-# ---- Retry helper ----
-def retry(func, max_attempts=3, delay=10, *args, **kwargs):
-    for attempt in range(1, max_attempts+1):
+
+def chunk_name(chunk_start, chunk_end):
+    return f"{chunk_start.strftime('%Y%m%d')}_{chunk_end.strftime('%Y%m%d')}"
+
+
+def s3_key(chunk_start, name):
+    return f"{S3_PREFIX}/{chunk_start.year}/{name}.nc"
+
+
+def completed_chunks_from_s3(s3):
+    """Return the set of chunk names that already exist in the bucket."""
+    completed = set()
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=f"{S3_PREFIX}/"):
+        for obj in page.get("Contents", []):
+            basename = obj["Key"].rsplit("/", 1)[-1]
+            if basename.endswith(".nc") and obj["Size"] > 0:
+                completed.add(basename[: -len(".nc")])
+    return completed
+
+
+def retry(func, *args, max_attempts=3, base_delay=15, **kwargs):
+    for attempt in range(1, max_attempts + 1):
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            print(f"Attempt {attempt} failed: {e}")
-            if attempt < max_attempts:
-                print(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-            else:
+            if attempt == max_attempts:
                 raise
+            delay = base_delay * 2 ** (attempt - 1)
+            log.warning("Attempt %d failed (%s); retrying in %ds", attempt, e, delay)
+            time.sleep(delay)
 
-# ---- Download & upload loop ----
-for chunk_start, chunk_end in generate_chunks(start_date, end_date):
-    chunk_name = f"{chunk_start.strftime('%Y%m%d')}_{chunk_end.strftime('%Y%m%d')}"
-    if chunk_name in completed_chunks:
-        print(f"Skipping already completed chunk {chunk_name}")
-        continue
 
-    print(f"Processing chunk: {chunk_start} → {chunk_end}")
+def download_chunk(name, chunk_start, request_end):
+    # Imported here so --dry-run works on machines without copernicusmarine.
+    import copernicusmarine
 
-    temp_file = os.path.join(local_temp_dir, f"{chunk_name}.nc")
-
-    # Download dataset chunk lazily
-    ds = retry(
-        copernicusmarine.open_dataset,
-        dataset_id=dataset_id,
-        start_datetime=chunk_start,
-        end_datetime=chunk_end,
-        minimum_longitude=min_lon,
-        maximum_longitude=max_lon,
-        minimum_latitude=min_lat,
-        maximum_latitude=max_lat,
-        chunk_size_limit=1000
+    # Naive datetimes get interpreted as *local* time by copernicusmarine
+    # v2 and silently shift the window; the dataset's time axis is UTC.
+    copernicusmarine.subset(
+        dataset_id=DATASET_ID,
+        start_datetime=chunk_start.replace(tzinfo=timezone.utc),
+        end_datetime=request_end.replace(tzinfo=timezone.utc),
+        minimum_longitude=MIN_LON,
+        maximum_longitude=MAX_LON,
+        minimum_latitude=MIN_LAT,
+        maximum_latitude=MAX_LAT,
+        output_directory=LOCAL_TEMP_DIR,
+        output_filename=f"{name}.nc",
+        overwrite=True,
+        disable_progress_bar=True,
     )
+    return os.path.join(LOCAL_TEMP_DIR, f"{name}.nc")
 
-    print(f"Saving chunk to {temp_file} using dask...")
-    with ProgressBar():
-        retry(ds.chunk({'time': 50}).to_netcdf, path=temp_file)
 
-    # Organize S3 keys by year
-    s3_key = f"{chunk_start.year}/{chunk_name}.nc"
-    print(f"Uploading {temp_file} to s3://{bucket_name}/{s3_key}...")
-    retry(s3.upload_file, Filename=temp_file, Bucket=bucket_name, Key=s3_key)
+def process_chunk(s3, chunk_start, chunk_end, is_last):
+    name = chunk_name(chunk_start, chunk_end)
+    # Trim one timestep except on the final chunk, whose end is the real
+    # end of the record rather than the start of a following chunk.
+    request_end = chunk_end if is_last else chunk_end - TIME_STEP
+    key = s3_key(chunk_start, name)
+    temp_file = None
+    try:
+        log.info("Downloading %s (%s -> %s)", name, chunk_start, request_end)
+        temp_file = retry(download_chunk, name, chunk_start, request_end)
+        log.info("Uploading %s to s3://%s/%s", name, BUCKET_NAME, key)
+        retry(s3.upload_file, temp_file, BUCKET_NAME, key)
+        log.info("Chunk %s complete", name)
+    finally:
+        if temp_file and os.path.exists(temp_file):
+            os.remove(temp_file)
 
-    # Remove local file
-    os.remove(temp_file)
 
-    # Log completed chunk
-    completed_chunks.append(chunk_name)
-    save_log()
-    print(f"Chunk {chunk_name} completed and uploaded.\n")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--dry-run", action="store_true",
+                        help="report resume state without downloading")
+    parser.add_argument("--workers", type=int, default=2,
+                        help="parallel chunk downloads (default 2)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="process at most N pending chunks (for testing)")
+    args = parser.parse_args()
 
-print("All chunks downloaded and uploaded successfully.")
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
 
+    s3 = boto3.client("s3")
+    completed = completed_chunks_from_s3(s3)
+
+    all_chunks = list(generate_chunks(START_DATE, END_DATE))
+    pending = [(cs, ce) for cs, ce in all_chunks
+               if chunk_name(cs, ce) not in completed]
+
+    log.info("%d chunks total, %d already in S3, %d pending",
+             len(all_chunks), len(all_chunks) - len(pending), len(pending))
+    if pending:
+        log.info("Resume point: %s", pending[0][0])
+    if args.dry_run or not pending:
+        return
+    if args.limit:
+        pending = pending[: args.limit]
+        log.info("Limiting this run to %d chunk(s)", len(pending))
+
+    last_start = all_chunks[-1][0]
+    failures = []
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        futures = {
+            pool.submit(process_chunk, s3, cs, ce, cs == last_start): (cs, ce)
+            for cs, ce in pending
+        }
+        for future in as_completed(futures):
+            cs, ce = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                name = chunk_name(cs, ce)
+                failures.append(name)
+                log.error("Chunk %s failed permanently: %s", name, e)
+
+    if failures:
+        log.error("%d chunks failed: %s — rerun to retry them",
+                  len(failures), ", ".join(sorted(failures)))
+        raise SystemExit(1)
+    log.info("All chunks downloaded and uploaded successfully.")
+
+
+if __name__ == "__main__":
+    main()
