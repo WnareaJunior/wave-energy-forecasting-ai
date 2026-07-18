@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import glob
 import logging
 import os
 import time
@@ -106,26 +107,35 @@ def retry(func, *args, max_attempts=3, base_delay=15, **kwargs):
 
 
 def wanted_byte_ranges(src, grib_key):
-    """Parse the .idx sidecar into (start, end) ranges for VARIABLES.
+    """Parse the .idx sidecar into {(var, level): [(start, end)]} ranges.
 
     idx line format: msg_num:byte_offset:d=YYYYMMDDHH:VAR:level:forecast:
     A message ends where the next one starts; the last runs to EOF (None).
-    Contiguous selected ranges are merged to cut request count.
+    Contiguous selected ranges are merged per group to cut request count.
+
+    Ranges are grouped per (variable, level) so each group decodes from its
+    own single-hypercube GRIB file. Decoding mixed messages from one file
+    makes cfgrib merge dataset groups internally (compat='no_conflicts'),
+    which loads the full global arrays for comparison — several GB per
+    member-day, an OOM on small instances.
     """
     idx_key = grib_key[: -len(".grib2")] + ".idx"
     idx_text = retry(src.get_object, Bucket=SOURCE_BUCKET,
                      Key=idx_key)["Body"].read().decode()
     lines = [line.split(":") for line in idx_text.strip().split("\n")]
-    ranges = []
+    ranges = {}
     for i, parts in enumerate(lines):
-        if parts[3] not in VARIABLES:
+        var, level = parts[3], parts[4]
+        if var not in VARIABLES:
             continue
         start = int(parts[1])
         end = int(lines[i + 1][1]) - 1 if i + 1 < len(lines) else None
-        if ranges and ranges[-1][1] is not None and ranges[-1][1] + 1 == start:
-            ranges[-1] = (ranges[-1][0], end)
+        group = ranges.setdefault((var, level), [])
+        if (group and group[-1][1] is not None
+                and group[-1][1] + 1 == start):
+            group[-1] = (group[-1][0], end)
         else:
-            ranges.append((start, end))
+            group.append((start, end))
     return ranges
 
 
@@ -139,37 +149,72 @@ def fetch_messages(src, grib_key, ranges, temp_grib):
                 f.write(chunk)
 
 
-def subset_to_netcdf(temp_grib, temp_nc):
+def subset_to_netcdf(group_gribs, temp_nc):
     import cfgrib
     import xarray as xr
 
-    # indexpath="" stops cfgrib writing .idx sidecars next to the temp file
-    datasets = cfgrib.open_datasets(temp_grib, indexpath="")
-    merged = xr.merge(datasets, compat="override")
-    subset = merged.sel(latitude=slice(MAX_LAT, MIN_LAT),
-                        longitude=slice(MIN_LON, MAX_LON))
-    encoding = {v: {"zlib": True, "complevel": 4} for v in subset.data_vars}
-    subset.to_netcdf(temp_nc, encoding=encoding)
+    pieces = []
+    seen = set()
+    for group in sorted(group_gribs):
+        for ds in cfgrib.open_datasets(group_gribs[group], indexpath=""):
+            sub = ds.sel(latitude=slice(MAX_LAT, MIN_LAT),
+                         longitude=slice(MIN_LON, MAX_LON)).load()
+            # .load() on a lazy cfgrib subset returns numpy VIEWS into the
+            # decoded full-globe arrays; deep-copy so the ~0.5 GB per-group
+            # base arrays are freed instead of accumulating until OOM.
+            sub = sub.copy(deep=True)
+            ds.close()
+            # Multi-level variables (swell partitions) produce one file per
+            # level with the same data_var name; suffix duplicates so every
+            # partition survives the merge. Sorted iteration keeps the
+            # suffix order deterministic (partition 1 -> bare name).
+            renames = {}
+            for name in sub.data_vars:
+                if name in seen:
+                    n = 2
+                    while f"{name}_{n}" in seen:
+                        n += 1
+                    renames[name] = f"{name}_{n}"
+                    seen.add(f"{name}_{n}")
+                else:
+                    seen.add(name)
+            if renames:
+                sub = sub.rename(renames)
+            pieces.append(sub)
+    merged = xr.merge(pieces, compat="override")
+    encoding = {v: {"zlib": True, "complevel": 4} for v in merged.data_vars}
+    merged.to_netcdf(temp_nc, encoding=encoding)
 
 
 def process_member_day(src, dst, day, member):
     name = output_name(day, member)
     grib_key = source_key(day, member)
-    temp_grib = os.path.join(LOCAL_TEMP_DIR, f"{day}.{member}.grib2")
     temp_nc = os.path.join(LOCAL_TEMP_DIR, name)
+    group_gribs = {}
     try:
         ranges = wanted_byte_ranges(src, grib_key)
-        log.info("Fetching %s (%d ranges)", name, len(ranges))
-        fetch_messages(src, grib_key, ranges, temp_grib)
-        subset_to_netcdf(temp_grib, temp_nc)
+        n_ranges = sum(len(r) for r in ranges.values())
+        log.info("Fetching %s (%d groups, %d ranges)", name, len(ranges), n_ranges)
+        for (var, level), group_ranges in ranges.items():
+            safe_level = level.replace(" ", "-")
+            temp_grib = os.path.join(
+                LOCAL_TEMP_DIR, f"{day}.{member}.{var}.{safe_level}.grib2")
+            fetch_messages(src, grib_key, group_ranges, temp_grib)
+            group_gribs[(var, level)] = temp_grib
+        subset_to_netcdf(group_gribs, temp_nc)
         key = dest_key(day, member)
         log.info("Uploading %s to s3://%s/%s", name, DEST_BUCKET, key)
         retry(dst.upload_file, temp_nc, DEST_BUCKET, key)
         log.info("%s complete", name)
     finally:
-        for path in (temp_grib, temp_nc):
+        for path in list(group_gribs.values()) + [temp_nc]:
             if os.path.exists(path):
                 os.remove(path)
+        # cfgrib writes .idx sidecars next to the temp GRIBs even with
+        # indexpath=""; sweep them so they don't pile up across 7000+ days.
+        for stray in glob.glob(os.path.join(LOCAL_TEMP_DIR,
+                                            f"{day}.{member}.*.idx")):
+            os.remove(stray)
 
 
 def main():
