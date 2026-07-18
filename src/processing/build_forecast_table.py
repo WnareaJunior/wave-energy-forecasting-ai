@@ -21,9 +21,17 @@ Output: one Parquet per init year and member at
 A year/member whose Parquet exists is skipped unless --force; partial
 years (backfill still running) are rebuilt when rerun with --force.
 
+Sweep mode (--sweep) is for the scheduled EC2 job that runs while the
+NOAA backfill is in flight: for every year/member whose raw archive is
+complete (day count matches the public source bucket) and whose Parquet
+is missing, it builds and uploads, then prints SWEEP_COMPLETE once every
+year/member is done — the sweep instance's user data watches for that
+marker to tear the schedule down.
+
 Usage:
   python build_forecast_table.py --years 2000 2001
   python build_forecast_table.py --years 2000 --members c00 --local-only
+  python build_forecast_table.py --sweep --members c00 p01 p02 p03 p04
 """
 
 import argparse
@@ -36,10 +44,14 @@ import botocore
 import numpy as np
 import pandas as pd
 import xarray as xr
+from botocore import UNSIGNED
+from botocore.config import Config
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ---- CONFIG ----
+SOURCE_BUCKET = "noaa-nws-gefswaves-reforecast-pds"
+SOURCE_ROOT = "GEFSv12/reforecast"
 RAW_BUCKET = "panthalassa-ocean-raw-data"
 OUT_BUCKET = "panthalassa-ocean-processed"
 NOAA_PREFIX = "noaa-data"
@@ -120,7 +132,13 @@ def normalize_forecast(path, grid_lat, grid_lon):
     df["longitude"] = snap(df.longitude)
     cols = (["init_time", "valid_time", "lead_hours", "latitude", "longitude"]
             + [FORECAST_VARS[v] for v in keep])
-    return df[cols]
+    df = df[cols]
+    # Downcast per file so a year's concat peaks at ~2.5 GB, not ~5 GB —
+    # keeps the sweep viable on a mid-size EC2 instance.
+    for c in df.columns:
+        if df[c].dtype == np.float64:
+            df[c] = df[c].astype(np.float32)
+    return df
 
 
 def build_year_member(s3, year, member):
@@ -157,6 +175,61 @@ def build_year_member(s3, year, member):
     return joined
 
 
+def source_day_count(year):
+    """Days available in NOAA's public reforecast bucket for a year —
+    the definition of 'raw archive complete' for the sweep."""
+    src = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    n = 0
+    paginator = src.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=SOURCE_BUCKET,
+                                   Prefix=f"{SOURCE_ROOT}/{year}/",
+                                   Delimiter="/"):
+        n += len(page.get("CommonPrefixes", []))
+    return n
+
+
+def upload_year_member(s3, year, member, local_only):
+    df = build_year_member(s3, year, member)
+    if df is None:
+        return
+    out_path = os.path.join(LOCAL_TEMP_DIR, f"forecast_{year}_{member}.parquet")
+    df.to_parquet(out_path, index=False)
+    log.info("%d/%s: %.1f MB", year, member, os.path.getsize(out_path) / 1e6)
+    if not local_only:
+        s3.upload_file(out_path, OUT_BUCKET, output_key(year, member))
+        os.remove(out_path)
+        log.info("%d/%s: uploaded s3://%s/%s", year, member,
+                 OUT_BUCKET, output_key(year, member))
+
+
+def sweep(s3, members):
+    """Build every year/member whose raw archive is complete and whose
+    output Parquet is missing. Prints SWEEP_COMPLETE when nothing is
+    left to wait for."""
+    done = True
+    for year in range(FIRST_YEAR, LAST_YEAR + 1):
+        expected = None
+        raw = s3.list_objects_v2(Bucket=RAW_BUCKET,
+                                 Prefix=f"{NOAA_PREFIX}/{year}/")
+        raw_names = [o["Key"].rsplit("/", 1)[-1]
+                     for o in raw.get("Contents", [])if o["Size"] > 0]
+        for member in members:
+            if s3_exists(s3, OUT_BUCKET, output_key(year, member)):
+                continue
+            if expected is None:
+                expected = source_day_count(year)
+            have = sum(1 for n in raw_names if f".{member}." in n)
+            if have < expected:
+                log.info("%d/%s: raw %d/%d days — waiting", year, member,
+                         have, expected)
+                done = False
+                continue
+            upload_year_member(s3, year, member, local_only=False)
+    if done:
+        log.info("SWEEP_COMPLETE: all %d-%d year/members built",
+                 FIRST_YEAR, LAST_YEAR)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--years", type=int, nargs="+",
@@ -164,31 +237,26 @@ def main():
     parser.add_argument("--members", nargs="+", default=MEMBERS)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--local-only", action="store_true")
+    parser.add_argument("--sweep", action="store_true",
+                        help="build only year/members whose raw archive is "
+                             "complete; print SWEEP_COMPLETE when all done")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
     s3 = boto3.client("s3")
 
+    if args.sweep:
+        sweep(s3, args.members)
+        return
+
     for year in args.years:
         for member in args.members:
-            key = output_key(year, member)
-            if not args.force and not args.local_only and s3_exists(s3, OUT_BUCKET, key):
+            if not args.force and not args.local_only and s3_exists(
+                    s3, OUT_BUCKET, output_key(year, member)):
                 log.info("%d/%s: exists, skipping", year, member)
                 continue
-            df = build_year_member(s3, year, member)
-            if df is None:
-                continue
-            out_path = os.path.join(LOCAL_TEMP_DIR,
-                                    f"forecast_{year}_{member}.parquet")
-            df.to_parquet(out_path, index=False)
-            log.info("%d/%s: %.1f MB", year, member,
-                     os.path.getsize(out_path) / 1e6)
-            if not args.local_only:
-                s3.upload_file(out_path, OUT_BUCKET, key)
-                os.remove(out_path)
-                log.info("%d/%s: uploaded s3://%s/%s", year, member,
-                         OUT_BUCKET, key)
+            upload_year_member(s3, year, member, args.local_only)
 
 
 if __name__ == "__main__":

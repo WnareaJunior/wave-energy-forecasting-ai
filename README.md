@@ -1,159 +1,75 @@
 # Panthalassa Buoy AI 🌊⚡
 
 **AI-powered ocean wave forecasting for renewable energy**
-Panthalassa Buoy AI uses advanced machine learning trained on Copernicus Marine and NOAA datasets to predict wave activity and identify optimal deployment sites for the **200-ft Panthalassa energy-harvesting buoy**.
+Panthalassa Buoy AI trains machine learning models on Copernicus Marine and NOAA datasets to predict wave activity and identify optimal deployment sites for the **200-ft Panthalassa energy-harvesting buoy** in the Pacific Northwest.
 
-This system provides **wave power flux analysis, spatial heatmaps, and forecasting models** to maximize ocean energy capture potential in the Pacific Northwest.
-
----
-
-## 🚧 Project Status
-
-This repository is **in active development** with cloud infrastructure deployed and data acquisition in progress.
-
-### ✅ Current Progress
-
-**Infrastructure & Data Pipeline**
-- Deployed **AWS cloud infrastructure** (EC2, S3, ECS) for large-scale ocean data processing
-- Configured **dual data acquisition pipeline**: Copernicus Marine observations + NOAA 20-year reforecast
-- Implemented **production S3 data architecture** with raw/processed/results bucket structure
-- Active **parallel data downloads**: ~30GB Copernicus + ~30GB NOAA datasets
-
-**Analysis Framework**
-- Built **wave power flux calculation engine** with validated oceanographic formulas
-- Developed **spatial filtering** for Pacific Northwest region (-130°W to -124°W, 46°N to 50.5°N)
-- Created **data validation schemas** for both Copernicus and NOAA datasets
-- Implemented **quality control pipelines** and consistency metrics
-
-**Processing Architecture**
-- **EC2-based processing cluster**: Separate instances for Copernicus vs NOAA data streams  
-- **Container orchestration** attempted (ECS Fargate) - migrated to EC2 for performance
-- **Automated data cleaning** and temporal aggregation functions
-- **Monthly/seasonal statistics** calculation framework
-
-### 🔜 Next Steps (This Week)
-- Complete **30GB+ dataset downloads** (estimated completion: ~24 hours)
-- Deploy **wave power flux analysis** on full Pacific Northwest datasets
-- Build **baseline forecasting models** (lag-1 regression, Random Forest)
-- Generate **revenue surface maps** and site rankings
-- Create **model validation framework** with RMSE benchmarking
+The system pairs NOAA's 20-year GEFS-Wave ensemble reforecast with the Copernicus wave hindcast as ground truth, so a model can learn to **correct and downscale forecasts site-by-site** — and eventually retrain on recent data on a schedule, publishing updated predictions to the project dashboard.
 
 ---
 
-## 🏗️ Technical Architecture
+## 🗺️ Study Region
 
-### **Cloud Infrastructure**
-- **AWS Region**: us-east-2 (Ohio)
-- **Data Storage**: 3-tier S3 architecture (raw → processed → results)
-- **Compute**: EC2 instances for data processing, ECS for containerized workloads
-- **Authentication**: Copernicus Marine CLI integration, AWS IAM roles
-
-### **Data Sources**
-**Primary Datasets (In Acquisition)**
-- **Copernicus Marine**: `cmems_mod_glo_wav_my_0.2deg_PT3H-i` - Satellite-observed wave data (2020-2023, 3-hourly, 0.2° resolution)
-- **NOAA Wave Ensemble Reforecast**: `noaa-nws-gefswaves-reforecast-pds` - 20-year WAVEWATCH III model hindcast (3-hourly, 0.25° resolution)
-
-**Data Characteristics**
-- **Geographic Focus**: Pacific Northwest offshore (Washington/BC high wave energy zone)
-- **Combined Coverage**: Observational truth (Copernicus) + long-term climatology (NOAA)  
-- **Processing Scale**: 60GB+ raw data → processed wave power analysis
-
-### **Processing Pipeline**
-```
-Raw Data Sources → S3 Raw → EC2 Processing → S3 Processed → ML Training → S3 Results
-```
+Washington / British Columbia offshore: **130–124°W, 46–50.5°N**, one of the highest wave-energy zones in North America (~38 kW/m mean power flux). All sources are aligned to the Copernicus 0.2° grid, 3-hourly, 598 ocean cells.
 
 ---
 
-## 🔬 Scientific Approach
-
-### **Wave Power Physics**
-- **Formula**: P = (ρ × g² / 64π) × H² × T
-- **Variables**: Significant wave height (H), peak period (T), seawater density (ρ)
-- **Output**: Wave power flux in W/m for energy resource assessment
-
-### **Validation Strategy**
-- **Copernicus Data**: Satellite observations provide ground truth for model validation
-- **NOAA Reforecast**: 20-year model climatology enables seasonal/interannual analysis  
-- **Cross-Validation**: Temporal splits preserve time series structure for forecasting
-
-### **Target Performance Metrics**
-- **Phase 1**: 5-10% RMSE improvement over persistence baseline
-- **Phase 2**: 15-20% improvement with ensemble methods
-- **Phase 3**: 25-30% improvement with advanced ML architectures
-
----
-
-## 📁 Repository Structure
+## 📊 Data Pipeline (complete)
 
 ```
-├── src/
-│   ├── infrastructure/     # AWS deployment and configuration
-│   ├── processing/         # Wave power calculations and data cleaning
-│   └── data/              # Schemas and configuration files
-├── notebooks/             # Jupyter analysis and prototyping
-├── docs/                  # Technical documentation and progress logs
-├── models/                # ML model implementations
-└── tests/                 # Unit tests and validation
+NOAA GEFS reforecast ─┐                        ┌─ training-table/   (hindcast, 44 yrs)
+Copernicus hindcast  ─┼─ S3 raw ─ normalize ───┤
+GLORYS currents/SST  ─┤                        └─ forecast-table/   (forecast⇄truth pairs)
+ETOPO1 bathymetry   ──┘
 ```
 
----
+| Source | Content | Coverage | Status |
+|---|---|---|---|
+| Copernicus `cmems_..._wav_my_0.2deg` | 17 wave variables (Hs, Te, Tp, direction, swell/wind-sea partitions) | 1980 – Apr 2023, 3-hourly | ✅ complete |
+| GLORYS12 | surface currents (uo, vo), SST | 2000 – 2019, daily | ✅ complete |
+| ETOPO1 static layer | depth, ocean fraction, distance-to-coast | static | ✅ complete |
+| NOAA GEFSv12 wave reforecast | 10 forecast variables, leads 0–16 d (35 d Wednesdays) | 2000 – 2019, 5 members | 🔄 backfilling (5 parallel EC2 instances, ETA ~Aug 2026) |
 
-## 🎯 Development Roadmap
+**Analysis-ready tables** (Parquet, `s3://panthalassa-ocean-processed/`):
+- `training-table/year=YYYY/` — hindcast rows (time × cell): waves + currents + SST + static features + derived power flux (P = ρg²/64π · Hs² · Te, using Te = VTM10). ~77M rows, 2.2 GB.
+- `forecast-table/year=YYYY/member=MMM/` — forecast-correction pairs: normalized GEFS forecast variables joined to hindcast truth at valid time, per lead hour. ~32M rows/year/member; fills automatically as the backfill lands.
 
-**Phase 1: Data Foundation (Weeks 1-2) - IN PROGRESS**
-- ✅ Cloud infrastructure deployment
-- 🔄 Large-scale data acquisition (Copernicus + NOAA)  
-- 🔄 Wave power flux analysis pipeline
-- 🔜 Baseline forecasting models
+A daily **EventBridge-scheduled sweep** (12:00 UTC) launches a self-terminating EC2 instance that builds any year/member whose raw backfill completed since the last run, and deletes its own schedule when the table is complete.
 
-**Phase 2: ML Development (Weeks 3-6)**
-- Advanced feature engineering (lags, seasonality, spatial patterns)
-- Random Forest and gradient boosting models  
-- LSTM neural networks for time series forecasting
-- Model validation and hyperparameter tuning
+### Key scripts
 
-**Phase 3: Production System (Weeks 7-10)**
-- Real-time forecasting API development
-- Interactive dashboard with spatial visualizations
-- Model deployment and monitoring infrastructure
-- Performance optimization and scaling
-
-**Phase 4: Advanced Analytics (Weeks 11-16)**
-- Physics-informed neural networks
-- Ensemble forecasting with uncertainty quantification
-- Extreme event detection and handling
-- Multi-horizon prediction capabilities
+| Script | Purpose |
+|---|---|
+| `src/infrastructure/copernicus_downloader.py` | Wave hindcast → S3, monthly chunks, S3-derived resume |
+| `src/infrastructure/glorys_downloader.py` | GLORYS currents/SST → S3, yearly |
+| `src/infrastructure/noaa_downloader.py` | GEFS reforecast → S3 via .idx byte-range subsetting, per-member |
+| `src/infrastructure/static_layer.py` | ETOPO1 → depth/distance-to-coast on the wave grid |
+| `src/infrastructure/launch_*.sh`, `setup_sweep_schedule.sh` | Self-terminating EC2 backfills + scheduled sweep (IaC) |
+| `src/processing/build_training_table.py` | Hindcast sources → training table |
+| `src/processing/build_forecast_table.py` | GEFS + truth → forecast table (`--sweep` for the scheduled job) |
+| `src/processing/wave_power_flux.py` | Power-flux physics and site-ranking utilities |
 
 ---
 
-## 🛠️ Technical Stack
+## 🚧 In Development
 
-**Infrastructure**: AWS (EC2, S3, ECS), Docker
-**Data Processing**: Python, xarray, pandas, numpy  
-**Machine Learning**: scikit-learn, TensorFlow/PyTorch
-**Oceanographic Data**: Copernicus Marine Toolbox, NOAA APIs
-**Visualization**: matplotlib, plotly, folium
+**Modeling (next up)**
+- **Baselines**: persistence, site×month climatology, raw uncorrected GEFS — the skill reference every model must beat
+- **Evaluation harness**: temporal walk-forward splits (spatial-holdout ablation), per-lead-time and per-site skill metrics
+- **XGBoost forecast-correction model**: GEFS + static + ocean-state features → corrected Hs / Te / power flux; quantile outputs (q10/q50/q90) for uncertainty
+- **Ensemble features**: mean/spread across the 5 members per init/lead/cell (blocked on p01–p04 backfill, ETA ~Aug 2026)
 
----
-
-## 📈 Current Metrics
-
-- **Data Pipeline**: 60GB+ multi-source ocean datasets
-- **Geographic Coverage**: Pacific Northwest energy resource zone
-- **Temporal Scope**: 3+ years observations + 20-year climatology  
-- **Processing Infrastructure**: Multi-instance AWS deployment
-- **Development Status**: Data acquisition phase, analysis framework complete
+**Product**
+- **Reward layer**: tunable "power − fatigue − risk − maintenance" scoring on top of the model's physical predictions (fatigue from swell/wind-sea partition + direction spread; risk/cost from depth + distance-to-coast)
+- **Operational loop**: scheduled retraining on recent data; same normalization pipeline pointed at the operational GEFS-Wave feed
+- **Live dashboard**: predictions published to S3 and rendered on the project site (`index.html` / `dashboard/`)
 
 ---
 
-## 🤝 Contributing
+## 🏗️ Infrastructure
 
-Technical collaboration welcome in:
-- Oceanographic modeling and validation
-- Machine learning for time series forecasting  
-- Renewable energy resource assessment
-- Cloud infrastructure and scalability
+- **AWS us-east-1** — S3 (raw → processed → results), self-terminating t3 EC2 workers, EventBridge Scheduler, IAM instance roles (no long-lived keys)
+- All infrastructure is scripted in `src/infrastructure/` (boto3 + AWS CLI); every backfill derives resume state from S3, so any job can be killed and relaunched idempotently
+- Stack: Python, xarray, cfgrib, pandas, PyArrow; XGBoost for modeling
 
 ---
 
@@ -165,6 +81,6 @@ MIT License
 
 ## 📬 Contact
 
-**Developer**: Wilson Narea  
-**Email**: [wilsondev27@outlook.com](mailto:wilsondev27@outlook.com)  
+**Developer**: Wilson Narea
+**Email**: [wilsondev27@outlook.com](mailto:wilsondev27@outlook.com)
 **Project**: Ocean Energy Forecasting Research
