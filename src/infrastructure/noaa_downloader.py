@@ -225,6 +225,8 @@ def main():
                         help="parallel member-day downloads (default 2)")
     parser.add_argument("--limit", type=int, default=None,
                         help="process at most N member-days (for testing)")
+    parser.add_argument("--members", nargs="+", default=MEMBERS,
+                        help="ensemble members to fetch (default: %(default)s)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -236,10 +238,10 @@ def main():
 
     days = list_source_days(src)
     completed = completed_from_s3(dst)
-    pending = [(d, m) for d in days for m in MEMBERS
+    pending = [(d, m) for d in days for m in args.members
                if output_name(d, m) not in completed]
 
-    total = len(days) * len(MEMBERS)
+    total = len(days) * len(args.members)
     log.info("%d member-days total, %d already in S3, %d pending",
              total, total - len(pending), len(pending))
     if pending:

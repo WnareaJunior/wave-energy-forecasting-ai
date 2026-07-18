@@ -20,7 +20,7 @@ cat > /opt/panthalassa/run.sh <<'EOF'
 set -uo pipefail
 export AWS_DEFAULT_REGION=us-east-1
 cd /opt/panthalassa
-venv/bin/python noaa_downloader.py --workers 3
+venv/bin/python noaa_downloader.py --workers 3 --members __MEMBERS__
 code=$?
 if [ $code -eq 0 ]; then
     echo "NOAA backfill complete - shutting down"
