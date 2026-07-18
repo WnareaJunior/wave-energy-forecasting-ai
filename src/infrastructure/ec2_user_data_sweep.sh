@@ -24,6 +24,11 @@ cd /opt/panthalassa
 venv/bin/python build_forecast_table.py --sweep \
     --members c00 p01 p02 p03 p04 2>&1 | tee /var/log/panthalassa-sweep.log
 
+# The instance terminates on shutdown, so persist the run log to S3 —
+# the only way to audit what a sweep did (or why it failed).
+aws s3 cp /var/log/panthalassa-sweep.log \
+    "s3://panthalassa-ocean-raw-data/scripts/logs/sweep-$(date -u +%Y%m%dT%H%M).log"
+
 if grep -q SWEEP_COMPLETE /var/log/panthalassa-sweep.log; then
     echo "Forecast table complete - removing sweep schedule"
     aws scheduler delete-schedule --name panthalassa-forecast-sweep
