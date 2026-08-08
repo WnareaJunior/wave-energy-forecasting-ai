@@ -50,6 +50,13 @@ on:
 permissions:
   contents: read
 
+# The `inputs` context is only populated for workflow_dispatch. On a push it is
+# empty, so every use needs a fallback or the job runs with blank arguments.
+env:
+  STATION: ${{ inputs.station || '46041' }}
+  YEARS: ${{ inputs.years || '2015-2023' }}
+  HORIZONS: ${{ inputs.horizons || '1,3,6,12,24,48,72' }}
+
 jobs:
   pilot:
     name: Run pilot
@@ -90,12 +97,9 @@ jobs:
       # Inputs are passed as environment variables rather than interpolated into
       # the script body, so no input value can be executed as shell.
       - name: Run pilot
-        env:
-          STATION: ${{ inputs.station }}
-          YEARS: ${{ inputs.years }}
-          HORIZONS: ${{ inputs.horizons }}
         run: |
           set -o pipefail
+          echo "Station: $STATION   Years: $YEARS   Horizons: $HORIZONS"
           python experiments/pilot_ndbc.py \
             --station "$STATION" \
             --years "$YEARS" \
@@ -103,9 +107,6 @@ jobs:
 
       - name: Publish results to the run summary
         if: always()
-        env:
-          STATION: ${{ inputs.station }}
-          YEARS: ${{ inputs.years }}
         run: |
           {
             echo "# Buoy pilot: NDBC $STATION, $YEARS"
@@ -119,7 +120,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pilot-${{ inputs.station }}-${{ inputs.years }}
+          name: pilot-${{ inputs.station || '46041' }}-${{ inputs.years || '2015-2023' }}
           path: |
             results/
             pilot.log
