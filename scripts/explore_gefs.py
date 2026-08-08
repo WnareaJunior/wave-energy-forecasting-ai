@@ -268,6 +268,18 @@ def _sample_at_buoy(datasets) -> None:
 
     for i, ds in enumerate(datasets):
         if "latitude" not in ds.coords or "longitude" not in ds.coords:
+            # Say why rather than skipping in silence. In the point-output
+            # files latitude and longitude are data variables with a time
+            # dimension, not coordinates, so this branch is taken and an
+            # earlier version printed the section header and nothing else.
+            available = list(ds.coords)
+            print(
+                f"dataset {i}: no latitude/longitude coordinates "
+                f"(coords are {available}). "
+                "If this is a station file, positions are data variables and "
+                "stations are selected by name - use "
+                "scripts/probe_gefs_stations.py instead."
+            )
             continue
 
         # Archives commonly store longitude as 0-360; the station is -124.7.

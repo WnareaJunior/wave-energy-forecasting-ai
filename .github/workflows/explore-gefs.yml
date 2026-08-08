@@ -26,6 +26,7 @@ on:
       - claude/forecasting-model-architecture-s5180n
     paths:
       - "scripts/explore_gefs.py"
+      - "scripts/probe_gefs_stations.py"
       - ".github/workflows/explore-gefs.yml"
 
 permissions:
@@ -68,6 +69,14 @@ jobs:
           if [ "$OPEN_SAMPLE" != "false" ]; then ARGS="$ARGS --open-sample"; fi
           # shellcheck disable=SC2086
           python scripts/explore_gefs.py $ARGS 2>&1 | tee gefs_layout.txt
+
+      # The layout is now known, so this is the question that remains: are our
+      # Washington-coast buoys among the archive's 658 point-output stations,
+      # and are they labelled with NDBC ids?
+      - name: Probe station coverage
+        run: |
+          set -o pipefail
+          python scripts/probe_gefs_stations.py --date 20160104 2>&1 | tee -a gefs_layout.txt
 
       - name: Publish to the run summary
         if: always()

@@ -153,6 +153,40 @@ NOAA_GRIDDED_TEMPLATE = (
 )
 NOAA_STATION_PREFIX_TEMPLATE = "GEFSv12/reforecast/{year}/{date}/station/"
 
+#: Point-output table: 8.7 MB, the file this project actually needs.
+NOAA_STATION_TAB_TEMPLATE = (
+    "GEFSv12/reforecast/{year}/{date}/station/gefs.wave.{date}.{member}.tab.nc"
+)
+
+#: Full 2D directional spectra, ~516 MB per member per cycle. Not needed here.
+NOAA_STATION_SPEC_TEMPLATE = (
+    "GEFSv12/reforecast/{year}/{date}/station/gefs.wave.{date}.{member}.spec.nc"
+)
+
+#: Schema of a tab.nc file, confirmed by opening one rather than assumed.
+#: dims: station=658, time=382, string40=40.
+#:
+#: `time` holds absolute VALID times, hourly, beginning at the 03Z cycle hour —
+#: note that the point output is hourly even though the gridded fields are
+#: 3-hourly, and that lead time is therefore not stored: it must be computed as
+#: valid_time minus cycle init. Getting that subtraction backwards is the one
+#: way to leak the future into a postprocessing dataset.
+#:
+#: `latitude` and `longitude` are data variables with dims (time, station), not
+#: coordinates, so they must be read at a timestep rather than off the index.
+NOAA_STATION_N_POINTS = 658
+NOAA_STATION_HS_VAR = "hs"  # spectral significant wave height, metres
+NOAA_STATION_VARS = {
+    "hs": "significant wave height [m]",
+    "lm": "mean wave length [m]",
+    "tr": "mean period normalised by relative frequency [s]",
+    "fp": "peak frequency, Tp = 1/fp [s-1]",
+    "th1p": "mean wave direction at spectral peak [degree]",
+    "sth1p": "directional spread at spectral peak [degree]",
+    "th1m": "mean wave direction from spectral moments [degree]",
+    "sth1m": "directional spread from spectral moments [degree]",
+}
+
 
 # --------------------------------------------------------------------------
 # Storage
