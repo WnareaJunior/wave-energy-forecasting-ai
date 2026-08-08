@@ -70,11 +70,19 @@ print("  reachable")
 PY
 
 # --- Run ------------------------------------------------------------------
+# Everything is tee'd to a log file. A dropped SSH session kills the terminal
+# but the log survives, so the output is recoverable on reconnect - and over a
+# mobile connection that happens often enough to plan for.
+mkdir -p results/pilot
+LOG="results/pilot/run_${STATION}.log"
+
 echo
 echo "Running pilot: station $STATION, years $YEARS"
+echo "Logging to: $LOG"
 echo
-python experiments/pilot_ndbc.py --station "$STATION" --years "$YEARS"
+python experiments/pilot_ndbc.py --station "$STATION" --years "$YEARS" 2>&1 | tee "$LOG"
 
 echo
 echo "Results CSV: results/pilot/pilot_${STATION}_results.csv"
-echo "Downloaded data cached in: data/raw/ndbc/"
+echo "Full log:    $LOG"
+echo "Cached data: data/raw/ndbc/"
