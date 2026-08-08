@@ -43,10 +43,20 @@ BUCKET = "noaa-nws-gefswaves-reforecast-pds"
 #: The archive's own documentation, at the bucket root.
 DESCRIPTION_KEY = "Description_of_reforecast_data.pdf"
 
-#: Only these are forecast data. The first version of this script also matched
-#: ".nc", picked up a 162 MB grid-info NetCDF, and spent eight minutes failing
-#: to parse it as GRIB2.
+#: Gridded forecast fields. Every daily cycle file bundles the whole 16-day,
+#: 3-hourly global run, so these are ~1.75 GB each - far too large to sample,
+#: and far more than this project needs.
 GRIB_EXTENSIONS = (".grib2", ".grb2", ".grb")
+
+#: Point output. Per the archive's own documentation these are time series of
+#: significant wave height, period and direction at 658 buoy positions - which
+#: is exactly what a postprocessing dataset needs, already extracted at the
+#: points of interest. Preferring these over the gridded fields avoids
+#: downloading and interpolating gigabytes to recover a handful of numbers.
+POINT_EXTENSIONS = (".nc",)
+
+#: Sub-prefixes to try first at each level: point output before gridded.
+PREFERRED_PREFIX_PARTS = ("station", "point")
 
 #: Static ancillary data - bathymetry, coastline distance, shapefiles. Large,
 #: and nothing to do with forecasts. Descending into it wastes the walk.
@@ -85,25 +95,40 @@ def list_level(s3, prefix: str, max_keys: int = 12):
     return prefixes, keys[:max_keys]
 
 
-def walk(s3, prefix: str = "", depth: int = 0, max_depth: int = 5, found=None) -> list:
-    """Print the prefix tree and collect every GRIB2 file seen.
+def _sort_key(prefix: str) -> tuple:
+    """Order sub-prefixes so point output is visited before gridded fields."""
+    lowered = prefix.lower()
+    preferred = any(part in lowered for part in PREFERRED_PREFIX_PARTS)
+    return (0 if preferred else 1, prefix)
 
-    Descends one representative path per level but prints all sibling prefixes,
-    so the naming convention is visible even where the walk does not recurse.
-    Unlike the first version, finding a file does not stop the walk - that bug
-    meant the grid-info branch short-circuited it before it ever reached the
-    reforecast data.
+
+def walk(s3, prefix: str = "", depth: int = 0, max_depth: int = 6, found=None) -> list:
+    """Print the prefix tree and collect every data file seen.
+
+    Returns a list of (key, size, kind) where kind is "point" or "gridded".
+
+    Two things the earlier versions got wrong. Finding a file used to stop the
+    walk, so the first branch visited short-circuited discovery - that is how
+    the grid-info branch hid the reforecast data. And the walk descended into
+    ``gridded/`` first and stopped, never seeing the ``station/`` sibling that
+    holds exactly the data this project wants. It now visits every child at the
+    level where the two appear, point output first.
     """
     found = [] if found is None else found
     indent = "  " * depth
     prefixes, keys = list_level(s3, prefix)
 
-    for key, size in keys[:6]:
-        marker = " <-- GRIB" if key.endswith(GRIB_EXTENSIONS) else ""
-        print(f"{indent}[file] {key}  ({size / 1e6:.1f} MB){marker}")
+    for key, size in keys[:8]:
         if key.endswith(GRIB_EXTENSIONS):
-            found.append((key, size))
-    if len(keys) > 6:
+            kind, marker = "gridded", " <-- GRIB (gridded field)"
+        elif key.endswith(POINT_EXTENSIONS):
+            kind, marker = "point", " <-- NetCDF (point output)"
+        else:
+            kind, marker = None, ""
+        print(f"{indent}[file] {key}  ({size / 1e6:.1f} MB){marker}")
+        if kind:
+            found.append((key, size, kind))
+    if len(keys) > 8:
         print(f"{indent}... and more files at this level")
 
     if depth >= max_depth:
@@ -117,14 +142,14 @@ def walk(s3, prefix: str = "", depth: int = 0, max_depth: int = 5, found=None) -
     if len(prefixes) > 10:
         print(f"{indent}... and {len(prefixes) - 10} more prefixes at this level")
 
-    # Descend into the interesting ones only.
-    descendable = [p for p in prefixes if not should_skip(p)]
-    for sub in descendable[:3]:
+    descendable = sorted(
+        (p for p in prefixes if not should_skip(p)), key=_sort_key
+    )
+    # Visit two branches per level rather than stopping at the first. Listing
+    # is cheap; missing a whole output type is not.
+    for sub in descendable[:2]:
         print(f"{indent}--> descending into {sub}")
         walk(s3, sub, depth + 1, max_depth, found)
-        # One full path to a GRIB file is enough to learn the convention.
-        if found:
-            break
 
     skipped = [p for p in prefixes if should_skip(p)]
     if skipped:
@@ -304,15 +329,22 @@ def main(argv=None) -> int:
 
     if not candidates:
         print(
-            "\nFAILED: no GRIB2 file found while walking. "
+            "\nFAILED: no data file found while walking. "
             "Increase --max-depth, or set --prefix to a known data path."
         )
         return 1
 
-    # Smallest first: the point is to learn the schema, not to move bytes.
-    candidates.sort(key=lambda item: item[1])
-    key, size = candidates[0]
-    print(f"\nFound {len(candidates)} GRIB2 file(s); smallest is:")
+    point = [c for c in candidates if c[2] == "point"]
+    gridded = [c for c in candidates if c[2] == "gridded"]
+    print(f"\nFound {len(point)} point-output and {len(gridded)} gridded file(s).")
+
+    # Point output first, then smallest. Gridded cycle files bundle the entire
+    # 16-day global run and run to ~1.75 GB, so they are never a viable sample
+    # and are not what this project needs anyway.
+    usable = point or gridded
+    usable.sort(key=lambda item: item[1])
+    key, size, kind = usable[0]
+    print(f"Sampling the smallest {kind} file:")
     print(f"  {key}  ({size / 1e6:.1f} MB)")
 
     if not args.open_sample:
@@ -320,7 +352,12 @@ def main(argv=None) -> int:
         return 0
 
     if size > MAX_SAMPLE_BYTES:
-        print(f"\nFAILED: larger than the {MAX_SAMPLE_BYTES / 1e6:.0f} MB sample cap.")
+        print(
+            f"\nFAILED: larger than the {MAX_SAMPLE_BYTES / 1e6:.0f} MB sample cap. "
+            "Gridded cycle files bundle the whole 16-day global run; use the "
+            "station/ point output instead, or a byte-range read via the .idx "
+            "sidecar."
+        )
         return 1
 
     local = Path("/tmp") / Path(key).name

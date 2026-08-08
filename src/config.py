@@ -113,12 +113,45 @@ COPERNICUS_RESOLUTION_DEG = 0.2
 COPERNICUS_START = "2020-01-01T00:00:00"
 COPERNICUS_END = "2023-04-30T21:00:00"
 
-#: NOAA GEFSv12 wave ensemble reforecast (WAVEWATCH III). Public S3 bucket.
-#: This is the *forecast* side of the pairing — the physics model whose errors
-#: a postprocessing model learns to correct.
+#: NOAA GEFSv12 wave ensemble reforecast (WAVEWATCH III v7.12 forced by GEFSv12
+#: winds). Public S3 bucket, unsigned access. This is the *forecast* side of the
+#: pairing — the physics model whose errors a postprocessing model learns to
+#: correct.
+#:
+#: Layout and characteristics below are from the archive's own
+#: Description_of_reforecast_data.pdf and a listing of the bucket, not guessed.
 NOAA_SOURCE_BUCKET = "noaa-nws-gefswaves-reforecast-pds"
 NOAA_SOURCE_PREFIX_TEMPLATE = "GEFSv12/reforecast/{year}/"
 NOAA_RESOLUTION_DEG = 0.25
+
+#: One cycle per day at 03Z, 3-hourly output, 16-day range (35 days on
+#: Wednesdays).
+NOAA_CYCLE_HOUR = 3
+NOAA_OUTPUT_INTERVAL_HOURS = 3
+NOAA_FORECAST_RANGE_HOURS = 16 * 24
+
+#: Five members: control plus four perturbed. Expanded to eleven on Wednesdays,
+#: so member count varies by day of week and code must not assume it is fixed.
+NOAA_MEMBERS = ("c00", "p01", "p02", "p03", "p04")
+
+#: Reforecast coverage. This is the binding constraint on the paired dataset:
+#: overlapped with an NDBC record starting in 2015, only 2015-2019 can be used.
+NOAA_FIRST_YEAR = 2000
+NOAA_LAST_YEAR = 2019
+
+#: Per-cycle key layout:
+#:   GEFSv12/reforecast/{year}/{yyyymmdd}/gridded/  ~1.75 GB GRIB2 per member
+#:   GEFSv12/reforecast/{year}/{yyyymmdd}/station/  NetCDF point output
+#:
+#: The station directory holds time series of significant wave height, period
+#: and direction at 658 buoy positions. That is the right source for this
+#: project: the gridded files bundle the entire 16-day global run to deliver a
+#: few numbers per buoy.
+NOAA_GRIDDED_TEMPLATE = (
+    "GEFSv12/reforecast/{year}/{date}/gridded/"
+    "gefs.wave.{date}.{member}.global.0p25.grib2"
+)
+NOAA_STATION_PREFIX_TEMPLATE = "GEFSv12/reforecast/{year}/{date}/station/"
 
 
 # --------------------------------------------------------------------------
