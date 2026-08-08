@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened ]
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        # Installing the full requirements set is deliberate: it is what catches
+        # an unparseable or unresolvable requirements.txt before it reaches a
+        # deployment target.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest --cov=src --cov-report=term-missing
+
+  encoding:
+    name: Requirements files are UTF-8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # requirements.txt was previously committed as UTF-16-LE with a BOM by a
+      # PowerShell `pip freeze >` redirect, which pip cannot parse on Linux.
+      - name: Check encoding
+        run: |
+          for f in requirements*.txt; do
+            python -c "open('$f', encoding='utf-8').read()" \
+              || { echo "::error file=$f::not valid UTF-8"; exit 1; }
+            head -c 3 "$f" | grep -q $'\xef\xbb\xbf' \
+              && { echo "::error file=$f::has a UTF-8 BOM"; exit 1; }
+            echo "$f OK"
+          done

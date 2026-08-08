@@ -52,9 +52,15 @@ idea, not a baseline anyone can be measured against.
    region the analysis was run on. This must be resolved before any dataset build.
 5. **Two power-flux conventions.** `wave_power_flux.py` uses
    `ρg²/64π ≈ 490` and returns **W/m** with `VTPK` (peak period); the notebook uses
-   `0.49 · H² · T` returning **kW/m** with `VTM02` (mean period). Same physics,
-   different units and different period variable. Pick one — `VTM02` is the correct
-   choice for the deep-water energy-flux formula — and delete the other.
+   `0.49 · H² · T` returning **kW/m** with `VTM02`. Same physics, different units and
+   different period variable.
+
+   Neither period variable is right. The formula is defined on the **energy period**
+   `Te = m₋₁/m₀`, which is exactly what Copernicus publishes as **`VTM10`** — a
+   variable both code paths ignore. `VTM02` is the zero-crossing period
+   (`Te ≈ 1.2·VTM02`) and `VTPK` is the peak period (`Te ≈ 0.86·VTPK`). Using `VTPK`
+   raw overstates flux by ~16 %; using `VTM02` raw understates it by ~17 %. Resolved
+   in Phase 0: `VTM10` preferred, documented conversion factors otherwise.
 6. **No reproducible data path.** Notebooks read `WAVE_DATA_DIR` from `.env`; `data/`,
    `*.nc` and `*.zarr` are gitignored. Nobody but the author can re-run anything.
 7. **No GPU.** `docs/infrastructure_setup.md` specifies `t3.large`. Transformers and
@@ -271,14 +277,18 @@ Fix this **before** training anything, or the model comparison is worthless.
 
 ## 6. Sequenced work plan
 
-**Phase 0 — Unblock (~1 day)**
-1. Re-encode `requirements.txt` to UTF-8; split into `requirements.txt` /
-   `requirements-ml.txt` (torch, lightgbm) / `requirements-dev.txt` (pytest, ruff).
-2. Fix or delete `.github/workflows/pr-build.yml`; add a Python CI job that installs,
-   lints, and runs pytest.
-3. **Resolve the region inconsistency** and correct the downloader bounds.
-4. Pick one power-flux convention; keep the `ρg²/64π` version, switch it to `VTM02`,
-   document the units in the docstring.
+**Phase 0 — Unblock — DONE**
+1. ✅ `requirements.txt` re-encoded to UTF-8 and split into `requirements.txt` /
+   `requirements-ml.txt` (torch, lightgbm, optuna) / `requirements-dev.txt`
+   (pytest, ruff). Dropped `pywin32` (Windows-only, uninstallable on Linux), added
+   the missing `cfgrib`/`eccodes` that `noaa_downloader` imports at runtime.
+2. ✅ Dead npm workflow removed (`index.html` loads React from a CDN — there was
+   never a build step). Replaced with `ci.yml`: ruff + pytest + a guard that fails
+   the build if any requirements file stops being UTF-8.
+3. ✅ Region unified in `src/config.py`; both downloaders import from it.
+4. ✅ One flux convention, W/m throughout, `VTM10` preferred with documented
+   conversion factors for `VTM02`/`VTPK`.
+5. ✅ 32 tests covering the physics and the region config.
 
 **Phase 1 — Data foundation (~1 week)**
 5. Refactor the two downloader scripts into `src/data/sources/` functions with config

@@ -1,15 +1,17 @@
-import boto3
 from datetime import datetime
+
+import boto3
+
 
 class PanthalassaEC2Manager:
     """
     Manages EC2 instances for ocean data processing
     """
-    
+
     def __init__(self, region='us-east-2'):
         self.ec2 = boto3.client('ec2', region_name=region)
         self.region = region
-    
+
     def get_instance_configs(self):
         """
         Define EC2 instance configurations used in the project
@@ -28,7 +30,7 @@ class PanthalassaEC2Manager:
                 ]
             },
             'noaa_processor': {
-                'instance_type': 't3.medium', 
+                'instance_type': 't3.medium',
                 'ami_id': 'ami-0c02fb55956c7d316',  # Amazon Linux 2
                 'key_name': 'your-key-pair',
                 'security_groups': ['default'],
@@ -40,7 +42,7 @@ class PanthalassaEC2Manager:
                 ]
             }
         }
-    
+
     def _get_copernicus_user_data(self):
         """
         User data script for Copernicus downloader instance
@@ -62,7 +64,7 @@ echo "# Copernicus Marine credentials configured via CLI login" > /home/ec2-user
 # Create download script template
 cat > /home/ec2-user/copernicus-processing/download_script.py << 'EOF'
 # Copernicus data download script
-# Dataset: cmems_mod_glo_wav_my_0.2deg_PT3H-i  
+# Dataset: cmems_mod_glo_wav_my_0.2deg_PT3H-i
 # Region: Pacific Northwest (-130°W to -124°W, 46°N to 50.5°N)
 # Purpose: Ocean wave data for energy forecasting
 EOF
@@ -72,7 +74,7 @@ chown -R ec2-user:ec2-user /home/ec2-user/copernicus-processing
 
     def _get_noaa_user_data(self):
         """
-        User data script for NOAA processor instance  
+        User data script for NOAA processor instance
         """
         return """#!/bin/bash
 yum update -y
@@ -112,13 +114,13 @@ chown -R ec2-user:ec2-user /home/ec2-user/noaa-processing
                     'geographic_bounds': {
                         'longitude_min': -130.0,
                         'longitude_max': -124.0,
-                        'latitude_min': 46.0, 
+                        'latitude_min': 46.0,
                         'latitude_max': 50.5
                     }
                 },
                 'noaa_processor': {
                     'status': 'running',
-                    'purpose': 'Process NOAA Wave Ensemble Reforecast', 
+                    'purpose': 'Process NOAA Wave Ensemble Reforecast',
                     'source_bucket': 'noaa-nws-gefswaves-reforecast-pds',
                     'coverage': '20-year historical reforecast data',
                     'processing_approach': 'S3-to-S3 transfer and filtering'
@@ -135,19 +137,19 @@ chown -R ec2-user:ec2-user /home/ec2-user/noaa-processing
                 'noaa': 'Public bucket access'
             }
         }
-        
+
         return deployment_status
 
 if __name__ == "__main__":
     manager = PanthalassaEC2Manager()
-    
+
     # Document current deployment
     status = manager.document_current_deployment()
-    
+
     print("Panthalassa EC2 Deployment Status:")
     print(f"Region: {status['region']}")
     print(f"Deployment Date: {status['deployment_date']}")
-    
+
     for instance_name, details in status['instances'].items():
         print(f"\n{instance_name}:")
         print(f"  Status: {details['status']}")

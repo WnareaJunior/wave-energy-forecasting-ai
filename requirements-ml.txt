@@ -1,0 +1,15 @@
+# Deep-learning and advanced-modelling stack.
+# Kept separate so the data pipeline and classical baselines stay installable
+# without a multi-gigabyte torch download.
+#
+#   pip install -r requirements.txt -r requirements-ml.txt
+#
+# For CPU-only installs:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+-r requirements.txt
+
+torch>=2.4,<3.0            # LSTM/TCN, Transformer, PINN rungs
+lightgbm>=4.5,<5.0         # the baseline to beat on tabular point forecasting
+optuna>=4.0,<5.0           # hyperparameter search
+properscoring>=0.1         # CRPS for probabilistic evaluation
