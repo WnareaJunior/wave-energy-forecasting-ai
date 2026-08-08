@@ -56,6 +56,52 @@ STUDY_REGION = PACIFIC_NORTHWEST
 
 
 # --------------------------------------------------------------------------
+# NDBC buoy stations
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Station:
+    """An NDBC moored buoy.
+
+    Positions are the nominal published deployment positions. Buoys drift within
+    a watch circle and are occasionally relocated between deployments, so treat
+    these as approximate (they are used to pick the nearest model grid cell,
+    where sub-kilometre accuracy does not matter).
+    """
+
+    station_id: str
+    name: str
+    latitude: float
+    longitude: float
+    depth_m: float | None = None
+
+    @property
+    def in_study_region(self) -> bool:
+        r = STUDY_REGION
+        return (
+            r.lon_min <= self.longitude <= r.lon_max
+            and r.lat_min <= self.latitude <= r.lat_max
+        )
+
+
+#: Buoys off the Washington coast, ordered by relevance to the deployment sites.
+#: 46041 and 46087 are the primary pair: both are exposed Washington-coast
+#: buoys with long, near-continuous records.
+NDBC_STATIONS = {
+    "46041": Station("46041", "Cape Elizabeth, WA", 47.353, -124.731, depth_m=133.0),
+    "46087": Station("46087", "Neah Bay, WA", 48.494, -124.728),
+    "46029": Station("46029", "Columbia River Bar, OR/WA", 46.159, -124.514, depth_m=135.0),
+    # Deep-water reference ~370 km offshore. Sits west of the study region's
+    # -130 boundary, so it is excluded from region-restricted runs by default.
+    "46005": Station("46005", "West Washington (offshore)", 46.134, -131.079, depth_m=2780.0),
+}
+
+#: Default station set for the pilot experiment.
+PILOT_STATIONS = ("46041", "46087", "46029")
+
+
+# --------------------------------------------------------------------------
 # Datasets
 # --------------------------------------------------------------------------
 

@@ -290,6 +290,29 @@ Fix this **before** training anything, or the model comparison is worthless.
    conversion factors for `VTM02`/`VTPK`.
 5. ✅ 32 tests covering the physics and the region config.
 
+**Phase 1a — NDBC buoy pilot — BUILT, not yet run on real data**
+
+Inserted ahead of the gridded pipeline: a few megabytes of real buoy
+observations instead of 60 GB, answering the "is there an edge" question before
+the heavy infrastructure is committed to. See
+[`pilot_experiment.md`](pilot_experiment.md).
+
+- ✅ `src/data/ndbc.py` — NDBC fetch/parse with header-driven column resolution,
+  per-column sentinel handling, physical range filtering, disk cache
+- ✅ `src/data/splits.py` — temporal and rolling-origin splits with an enforced gap
+- ✅ `src/features/build.py` — causal lag, rolling, physics, calendar and
+  circular-direction features
+- ✅ `src/models/` — the `Forecaster` contract, registry, and the first five
+  rungs (mean, persistence, seasonal-naive, climatology, ridge, LightGBM), plus
+  the `raw_nwp` and `nwp_debiased` postprocessing references
+- ✅ `src/eval/` — per-horizon metrics including storm-conditioned RMSE, skill
+  against a configurable reference, and the backtest loop
+- ✅ `experiments/pilot_ndbc.py` — the runnable entrypoint, both tracks
+- ✅ 163 tests, 85 % coverage, including direct leakage tests
+- ⛔ **Not run on real data.** The session that built this had no network egress
+  to `ndbc.noaa.gov` or the NOAA S3 bucket. Verified end to end on synthetic
+  data only; synthetic numbers are not results.
+
 **Phase 1 — Data foundation (~1 week)**
 5. Refactor the two downloader scripts into `src/data/sources/` functions with config
    objects; fix the NOAA paginator.
