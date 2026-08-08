@@ -162,11 +162,12 @@ class TestSupervisedAlignment:
             observations["WVHT"].loc[issue_time + pd.Timedelta(hours=6)]
         )
 
-    def test_no_nans_survive(self, observations):
+    def test_target_and_required_features_are_complete(self, observations):
+        """Other features may hold NaN by design - see TestRealisticMissingness."""
         features = build_feature_frame(observations)
         X, y = make_supervised(features, observations["WVHT"], horizon=24)
-        assert not X.isna().any().any()
         assert not y.isna().any()
+        assert not X["WVHT"].isna().any()
 
     def test_x_and_y_stay_aligned(self, observations):
         features = build_feature_frame(observations)
@@ -178,3 +179,84 @@ class TestSupervisedAlignment:
         _, y_short = make_supervised(features, observations["WVHT"], horizon=1)
         _, y_long = make_supervised(features, observations["WVHT"], horizon=72)
         assert len(y_long) < len(y_short)
+
+
+class TestRealisticMissingness:
+    """Regression tests for the gapped-data bug.
+
+    A real NDBC record is ~13% missing. An earlier make_supervised dropped any
+    row with a NaN anywhere in the feature set; with ~77 lag features that
+    leaves P = 0.87^77 of rows, about one in 65,000. It produced an empty
+    training set on real data while passing on 3%-missing synthetic input.
+    """
+
+    @pytest.fixture
+    def gappy_observations(self):
+        """Hourly record with 13% scattered missing, matching NDBC 46041."""
+        index = pd.date_range("2020-01-01", periods=4000, freq="1h", tz="UTC")
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(
+            {
+                "WVHT": 2 + np.sin(np.arange(4000) / 100) + rng.normal(0, 0.2, 4000),
+                "APD": 7 + rng.normal(0, 0.3, 4000),
+                "DPD": 10 + rng.normal(0, 0.5, 4000),
+                "MWD": (270 + rng.normal(0, 20, 4000)) % 360,
+                "WSPD": 8 + rng.normal(0, 1, 4000),
+                "WDIR": (260 + rng.normal(0, 25, 4000)) % 360,
+            },
+            index=index,
+        )
+        for column in df.columns:
+            df.loc[rng.random(4000) < 0.134, column] = np.nan
+        return df
+
+    def test_most_rows_survive_alignment(self, gappy_observations):
+        """The headline check: a gapped record must still yield a usable set."""
+        features = build_feature_frame(gappy_observations)
+        X, y = make_supervised(features, gappy_observations["WVHT"], horizon=24)
+        # Both target and issue-time value must be present: ~0.866^2 = 75%.
+        assert len(X) > 0.6 * len(gappy_observations)
+
+    def test_target_is_never_nan(self, gappy_observations):
+        features = build_feature_frame(gappy_observations)
+        _, y = make_supervised(features, gappy_observations["WVHT"], horizon=24)
+        assert not y.isna().any()
+
+    def test_required_column_is_never_nan(self, gappy_observations):
+        """Persistence needs the issue-time value, so it must be complete."""
+        features = build_feature_frame(gappy_observations)
+        X, _ = make_supervised(features, gappy_observations["WVHT"], horizon=24)
+        assert not X["WVHT"].isna().any()
+
+    def test_nans_are_retained_elsewhere(self, gappy_observations):
+        """Lag features keep their NaNs - models handle or impute them."""
+        features = build_feature_frame(gappy_observations)
+        X, _ = make_supervised(features, gappy_observations["WVHT"], horizon=24)
+        assert X.isna().any().any()
+
+    def test_extra_required_columns_are_honoured(self, gappy_observations):
+        features = build_feature_frame(gappy_observations)
+        X, _ = make_supervised(
+            features,
+            gappy_observations["WVHT"],
+            horizon=24,
+            required_columns=["WVHT", "WSPD"],
+        )
+        assert not X[["WVHT", "WSPD"]].isna().any().any()
+
+    def test_ridge_trains_on_gapped_features(self, gappy_observations):
+        """Ridge cannot accept NaN, so its pipeline must impute internally."""
+        from src.models.linear import RidgeForecaster
+
+        features = build_feature_frame(gappy_observations)
+        X, y = make_supervised(features, gappy_observations["WVHT"], horizon=24)
+        predictions = RidgeForecaster().fit(X, y).predict(X)
+        assert np.isfinite(predictions).all()
+
+    def test_persistence_works_on_gapped_features(self, gappy_observations):
+        from src.models.baselines import PersistenceForecaster
+
+        features = build_feature_frame(gappy_observations)
+        X, y = make_supervised(features, gappy_observations["WVHT"], horizon=24)
+        predictions = PersistenceForecaster().fit(X, y).predict(X)
+        assert np.isfinite(predictions).all()

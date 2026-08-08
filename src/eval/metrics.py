@@ -102,13 +102,21 @@ def evaluate(
     Returns:
         dict of metric name to value.
     """
+    # n counts pairs where both the observation and the forecast are present.
+    # Counting only valid observations would hide a model that silently failed
+    # to predict on part of the test set, making its RMSE look comparable to a
+    # model that predicted everywhere.
+    valid = ~(
+        np.isnan(np.asarray(y_true, float)) | np.isnan(np.asarray(y_pred, float))
+    )
+
     results = {
         "rmse": rmse(y_true, y_pred),
         "mae": mae(y_true, y_pred),
         "bias": bias(y_true, y_pred),
         "correlation": correlation(y_true, y_pred),
         f"rmse_p{int(storm_percentile)}": storm_rmse(y_true, y_pred, storm_percentile),
-        "n": int(np.sum(~np.isnan(np.asarray(y_true, float)))),
+        "n": int(valid.sum()),
     }
     if y_reference is not None:
         results["skill_vs_reference"] = skill_score(y_true, y_pred, y_reference)

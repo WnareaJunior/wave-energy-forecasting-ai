@@ -180,23 +180,44 @@ def make_supervised(
     target: pd.Series,
     horizon: int,
     feature_columns: list[str] | None = None,
+    required_columns: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.Series]:
     """Align features at issue time t with the target at t + horizon.
+
+    Rows are dropped only when the target or a *required* feature is missing -
+    never for a NaN anywhere in the feature set. That distinction matters more
+    than it looks. A real buoy record is ~13% missing, and with ~77 lag
+    features a row needs every one of them present to survive a blanket
+    ``dropna``: P = 0.87^77, roughly one row in 65,000. An earlier version did
+    exactly that and silently produced an empty training set on real data while
+    working fine on cleaner synthetic input.
+
+    Remaining NaNs are left in place. LightGBM handles them natively; models
+    that cannot (ridge) impute inside their own pipeline, fitted on training
+    data only.
 
     Args:
         features: Causal features indexed by issue time.
         target: Observed series to predict.
         horizon: Lead time in hours.
-        feature_columns: Subset of feature columns to use. Defaults to all
-            columns that are not the raw target itself at time t.
+        feature_columns: Subset of feature columns to use. Defaults to all.
+        required_columns: Columns that must be present for a row to be usable.
+            Defaults to the target variable at issue time, which persistence
+            needs to produce a forecast at all - without it there is no
+            reference to score against.
 
     Returns:
-        (X, y) with rows containing NaN in either dropped, so both are aligned
-        and complete.
+        (X, y), aligned, with the target complete and required features
+        present. Other features may contain NaN.
     """
     y = target.shift(-horizon)
     y.name = f"{target.name}_h{horizon}"
 
     X = features if feature_columns is None else features[feature_columns]
-    combined = X.join(y, how="inner").dropna()
+
+    if required_columns is None:
+        required_columns = [str(target.name)] if target.name in X.columns else []
+
+    combined = X.join(y, how="inner")
+    combined = combined.dropna(subset=[y.name, *required_columns])
     return combined.drop(columns=[y.name]), combined[y.name]

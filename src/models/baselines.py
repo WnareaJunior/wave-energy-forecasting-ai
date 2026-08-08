@@ -101,6 +101,11 @@ class SeasonalNaiveForecaster(Forecaster):
     Captures the diurnal cycle. Weak for waves - unlike temperature, wave height
     has little daily rhythm - but cheap to include and it makes the absence of a
     diurnal signal visible in the results table rather than assumed.
+
+    Where the seasonal lag is missing - buoy records are gapped, so a value
+    exactly 24 hours back often is - it falls back to the issue-time value.
+    Returning NaN instead would quietly shrink this model's sample and make its
+    RMSE incomparable with models that predicted everywhere.
     """
 
     name = "seasonal_naive"
@@ -116,8 +121,11 @@ class SeasonalNaiveForecaster(Forecaster):
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         column = f"{self.variable}_lag{self.period_hours}"
         if column not in X.columns:
-            column = _current_value_column(X, self.variable)
-        return X[column].to_numpy()
+            return X[_current_value_column(X, self.variable)].to_numpy()
+
+        seasonal = X[column]
+        fallback = X[_current_value_column(X, self.variable)]
+        return seasonal.fillna(fallback).to_numpy()
 
 
 class RawNWPForecaster(Forecaster):

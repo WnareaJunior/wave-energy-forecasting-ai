@@ -65,8 +65,21 @@ def run_horizon(
     val_index = X.index.intersection(split.validation)
     test_index = X.index.intersection(split.test)
 
+    # Log the sample counts every time. An empty training set is otherwise
+    # indistinguishable from a model failure, and the counts are the first thing
+    # worth checking when results look wrong.
+    logger.info(
+        "Horizon %sh: %d usable rows -> train %d, val %d, test %d",
+        horizon, len(X), len(train_index), len(val_index), len(test_index),
+    )
+
     if len(train_index) == 0 or len(test_index) == 0:
-        logger.warning("Horizon %sh: empty train or test set, skipping", horizon)
+        logger.warning(
+            "Horizon %sh: empty train or test set, skipping. "
+            "%d rows survived alignment out of %d feature rows - if that ratio "
+            "is near zero, check how many features are required to be non-NaN.",
+            horizon, len(X), len(features),
+        )
         return []
 
     check_no_overlap(train_index, test_index, gap_hours)

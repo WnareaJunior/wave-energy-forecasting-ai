@@ -20,7 +20,7 @@ def generate_buoy_record(
     end: str = "2024-01-01",
     freq: str = "1h",
     seed: int = 0,
-    missing_fraction: float = 0.03,
+    missing_fraction: float = 0.13,
     outage_count: int = 6,
 ) -> pd.DataFrame:
     """Generate a synthetic NDBC-like hourly record.
@@ -34,7 +34,10 @@ def generate_buoy_record(
         end: Last timestamp (exclusive).
         freq: Sampling frequency.
         seed: Random seed.
-        missing_fraction: Fraction of scattered isolated missing values.
+        missing_fraction: Fraction of scattered isolated missing values. The
+            default matches NDBC 46041's measured gappiness (~13% of hours
+            absent over 2015-2023). An earlier default of 3% was optimistic
+            enough to hide a bug that only appeared on real data.
         outage_count: Number of multi-day gaps to punch in the record.
 
     Returns:

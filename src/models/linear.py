@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -20,10 +21,16 @@ from src.models.base import Forecaster
 class RidgeForecaster(Forecaster):
     """Ridge regression on standardised features.
 
-    Scaling is inside the pipeline, so it is fitted on training data only and
-    travels with the model when it is pickled. Fitting a scaler on the full
-    dataset before splitting is the most common way test-set information leaks
-    into training.
+    Imputation and scaling are inside the pipeline, so both are fitted on
+    training data only and travel with the model when it is pickled. Fitting
+    either on the full dataset before splitting is the most common way test-set
+    information leaks into training.
+
+    The imputer is not optional: buoy records are heavily gapped, and
+    :func:`~src.features.build.make_supervised` deliberately leaves NaNs in the
+    non-required features rather than throwing away most of the dataset.
+    Median imputation is used because wave variables are right-skewed, so the
+    mean sits above the typical value.
     """
 
     name = "ridge"
@@ -32,6 +39,7 @@ class RidgeForecaster(Forecaster):
         self.alpha = alpha
         self._pipeline = Pipeline(
             [
+                ("impute", SimpleImputer(strategy="median")),
                 ("scale", StandardScaler()),
                 ("ridge", Ridge(alpha=alpha)),
             ]

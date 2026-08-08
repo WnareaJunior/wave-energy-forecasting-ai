@@ -159,7 +159,22 @@ class TestSeasonalNaive:
     def test_uses_the_lag_at_the_seasonal_period(self, supervised):
         X, y = supervised
         model = SeasonalNaiveForecaster(variable="WVHT", period_hours=24).fit(X, y)
-        np.testing.assert_allclose(model.predict(X), X["WVHT_lag24"].to_numpy())
+        expected = X["WVHT_lag24"].fillna(X["WVHT"]).to_numpy()
+        np.testing.assert_allclose(model.predict(X), expected)
+
+    def test_falls_back_when_the_seasonal_lag_is_missing(self):
+        """Gapped records mean lag24 is often absent; never return NaN."""
+        index = pd.date_range("2020-01-01", periods=4, freq="1h", tz="UTC")
+        X = pd.DataFrame(
+            {
+                "WVHT": [1.0, 2.0, 3.0, 4.0],
+                "WVHT_lag24": [np.nan, 9.0, np.nan, 7.0],
+            },
+            index=index,
+        )
+        y = pd.Series([1.0, 2.0, 3.0, 4.0], index=index, name="WVHT")
+        predictions = SeasonalNaiveForecaster().fit(X, y).predict(X)
+        np.testing.assert_allclose(predictions, [1.0, 9.0, 3.0, 7.0])
 
 
 class TestRegistry:
