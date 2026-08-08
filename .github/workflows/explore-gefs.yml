@@ -1,0 +1,90 @@
+name: Explore GEFS bucket
+
+# One-off discovery run: lists the NOAA GEFSv12 wave reforecast bucket and
+# describes a sample GRIB2 file, so the extractor can be written against the
+# archive's real layout rather than an assumed one.
+#
+# The bucket is public and unsigned requests work, so no AWS credentials are
+# needed and none are configured here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      prefix:
+        description: "S3 prefix to start walking from (blank = bucket root)"
+        required: false
+        default: ""
+        type: string
+      open_sample:
+        description: "Download one GRIB2 file and describe its contents"
+        required: false
+        default: true
+        type: boolean
+
+  push:
+    branches:
+      - claude/forecasting-model-architecture-s5180n
+    paths:
+      - "scripts/explore_gefs.py"
+      - ".github/workflows/explore-gefs.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  explore:
+    name: Explore
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # cfgrib needs the ecCodes C library. The pip wheel bundles it on most
+      # platforms, but the system package is cheap insurance against a build
+      # that does not.
+      - name: Install ecCodes
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libeccodes0
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3 xarray cfgrib eccodes numpy pandas
+
+      - name: Walk the bucket
+        env:
+          PREFIX: ${{ inputs.prefix }}
+          OPEN_SAMPLE: ${{ inputs.open_sample }}
+        run: |
+          set -o pipefail
+          ARGS=""
+          if [ -n "$PREFIX" ]; then ARGS="--prefix $PREFIX"; fi
+          # Default to sampling: on a push there are no inputs, and the file
+          # contents are the whole point of the run.
+          if [ "$OPEN_SAMPLE" != "false" ]; then ARGS="$ARGS --open-sample"; fi
+          # shellcheck disable=SC2086
+          python scripts/explore_gefs.py $ARGS 2>&1 | tee gefs_layout.txt
+
+      - name: Publish to the run summary
+        if: always()
+        run: |
+          {
+            echo "# GEFS bucket layout"
+            echo
+            echo '```'
+            cat gefs_layout.txt 2>/dev/null || echo "no output captured"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gefs-layout-run${{ github.run_number }}
+          path: gefs_layout.txt
+          if-no-files-found: warn
+          retention-days: 30
