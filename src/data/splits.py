@@ -130,6 +130,41 @@ def rolling_origin_splits(
         yield train, test
 
 
+def carve_validation(
+    train: pd.DatetimeIndex,
+    fraction: float = 0.15,
+    gap_hours: int = 72,
+) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    """Split a training block into (train, validation) at its tail.
+
+    Rolling-origin folds are (train, test) pairs, but models with early stopping
+    need a third block. Taking it from the end of training - the period closest
+    to the test window - means the stopping decision is made on the most
+    recent regime, and it avoids the failure the fixed-split run hit, where a
+    hard-coded validation year happened to be almost entirely missing at that
+    station.
+
+    Args:
+        train: Training index for one fold.
+        fraction: Share of the training block to hold out.
+        gap_hours: Buffer discarded between the two blocks.
+
+    Returns:
+        (train, validation). Validation is empty if the block is too short to
+        split, which callers must tolerate rather than assume away.
+    """
+    train = pd.DatetimeIndex(train).sort_values()
+    if len(train) < 10:
+        return train, pd.DatetimeIndex([], tz=train.tz)
+
+    cut = train[int(len(train) * (1 - fraction))]
+    gap = pd.Timedelta(hours=gap_hours)
+
+    inner_train = train[train <= cut]
+    validation = train[train > cut + gap]
+    return inner_train, validation
+
+
 def check_no_overlap(train: pd.DatetimeIndex, test: pd.DatetimeIndex, gap_hours: int) -> None:
     """Raise if train and test are not separated by at least ``gap_hours``.
 

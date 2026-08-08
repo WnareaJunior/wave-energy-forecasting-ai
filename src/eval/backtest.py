@@ -11,7 +11,12 @@ import logging
 
 import pandas as pd
 
-from src.data.splits import Split, check_no_overlap
+from src.data.splits import (
+    Split,
+    carve_validation,
+    check_no_overlap,
+    rolling_origin_splits,
+)
 from src.eval.metrics import evaluate, results_table
 from src.features.build import make_supervised
 from src.models.base import Forecaster
@@ -140,8 +145,120 @@ def run_backtest(
     return results_table(records)
 
 
+def run_rolling_backtest(
+    features: pd.DataFrame,
+    target: pd.Series,
+    horizons,
+    factory_builder,
+    n_splits: int = 4,
+    test_size_days: int = 90,
+    gap_hours: int = 72,
+    val_fraction: float = 0.15,
+    storm_percentile: float = 90,
+    reference_factory=None,
+) -> pd.DataFrame:
+    """Score every model across several consecutive test windows.
+
+    A single train/validate/test split gives one number whose value depends on
+    which months happened to land in the test window. With a few years of data
+    that is a real risk, and it offers no way to tell a genuine difference
+    between two models from noise. Rolling-origin evaluation scores each model
+    on ``n_splits`` successive periods, so the spread across folds becomes the
+    error bar.
+
+    Each fold's validation block is carved from the tail of its own training
+    block rather than being a fixed calendar year, which is what broke the
+    first real run: 46041's 2022 record is almost entirely missing, so
+    LightGBM early-stopped against 1,716 rows.
+
+    Args:
+        features: Causal feature frame.
+        target: Series to forecast.
+        horizons: Lead times in hours.
+        factory_builder: Callable taking a seed and returning a dict of model
+            factories. Called once per fold with the fold index as the seed, so
+            stochastic models vary between folds and the fold spread reflects
+            seed variance as well as period variance.
+        n_splits: Number of folds.
+        test_size_days: Length of each test window.
+        gap_hours: Buffer between blocks.
+        val_fraction: Share of each training block held out for early stopping.
+        storm_percentile: Percentile defining storm conditions.
+        reference_factory: Forecaster that skill is measured against.
+
+    Returns:
+        Long-format DataFrame, one row per (fold, horizon, model).
+    """
+    records = []
+
+    for fold, (train_index, test_index) in enumerate(
+        rolling_origin_splits(features.index, n_splits, test_size_days, gap_hours)
+    ):
+        inner_train, validation = carve_validation(train_index, val_fraction, gap_hours)
+        split = Split(train=inner_train, validation=validation, test=test_index)
+
+        logger.info(
+            "Fold %d: train %s -> %s, test %s -> %s",
+            fold,
+            inner_train.min().date() if len(inner_train) else None,
+            inner_train.max().date() if len(inner_train) else None,
+            test_index.min().date() if len(test_index) else None,
+            test_index.max().date() if len(test_index) else None,
+        )
+
+        factories = factory_builder(fold)
+        for horizon in horizons:
+            fold_records = run_horizon(
+                features, target, horizon, factories, split,
+                gap_hours, storm_percentile, reference_factory,
+            )
+            for record in fold_records:
+                record["fold"] = fold
+            records.extend(fold_records)
+
+    return pd.DataFrame(records)
+
+
+def aggregate_folds(records: pd.DataFrame, metric: str = "rmse") -> pd.DataFrame:
+    """Mean and standard deviation of one metric across folds.
+
+    The standard deviation is the point of running folds at all: a difference
+    between two models that is smaller than their fold-to-fold spread is not a
+    difference worth acting on.
+
+    Returns:
+        DataFrame indexed by (horizon, model) with ``mean``, ``std``, and
+        ``n_folds`` columns.
+    """
+    if records.empty:
+        return records
+
+    grouped = records.groupby(["horizon", "model"])[metric]
+    return pd.DataFrame(
+        {
+            "mean": grouped.mean(),
+            "std": grouped.std(),
+            "n_folds": grouped.count(),
+        }
+    )
+
+
+def format_mean_std(records: pd.DataFrame, metric: str = "rmse", decimals: int = 3):
+    """Horizon-by-model table of "mean ± std" strings, for printing."""
+    if records.empty:
+        return records
+    stats = aggregate_folds(records, metric)
+    formatted = stats.apply(
+        lambda row: f"{row['mean']:.{decimals}f} ± {row['std']:.{decimals}f}"
+        if pd.notna(row["std"])
+        else f"{row['mean']:.{decimals}f}",
+        axis=1,
+    )
+    return formatted.unstack("model")
+
+
 def skill_summary(results: pd.DataFrame, metric: str = "rmse") -> pd.DataFrame:
-    """Pivot results into a horizon-by-model matrix for one metric."""
+    """Pivot single-split results into a horizon-by-model matrix for one metric."""
     if results.empty:
         return results
     return results[metric].unstack("model")

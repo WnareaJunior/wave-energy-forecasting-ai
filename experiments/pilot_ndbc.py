@@ -1,19 +1,28 @@
 """Pilot experiment: how much wave-height forecast skill is there at a buoy?
 
-Runs the full ladder - mean, persistence, seasonal-naive, climatology, ridge,
-LightGBM - across lead times from 1 to 72 hours at a Washington-coast NDBC
-buoy, and reports skill relative to persistence.
+Runs the ladder - mean, persistence, seasonal-naive, climatology, ridge,
+LightGBM - across lead times from 1 to 72 hours at Washington-coast NDBC buoys,
+and reports skill relative to persistence.
 
 The question it answers is deliberately narrow: **at what lead time does a
 statistical model start to beat "the sea will stay as it is", and by how much?**
 Everything heavier - the Transformer, the PINN, the gridded pipeline - should be
 justified against this table, not against a strawman.
 
+Read the climatology row, not just the persistence row. Climatology ignores
+current conditions entirely, so the lead time where a model stops beating it is
+the lead time where the buoy's own history has stopped carrying information.
+
 Usage
 -----
-Real buoy data (needs network access to ndbc.noaa.gov)::
+Rolling-origin evaluation across three stations (the default, and the one to
+trust - it reports an error bar)::
 
-    python experiments/pilot_ndbc.py --station 46041 --years 2015-2023
+    python experiments/pilot_ndbc.py --stations 46041,46087,46029
+
+Single fixed split, faster, no error bar::
+
+    python experiments/pilot_ndbc.py --station 46041 --no-rolling
 
 Synthetic data, to verify the pipeline runs (no network)::
 
@@ -36,14 +45,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import NDBC_STATIONS  # noqa: E402
 from src.data.splits import temporal_split  # noqa: E402
-from src.eval.backtest import run_backtest, skill_summary  # noqa: E402
+from src.eval.backtest import (  # noqa: E402
+    aggregate_folds,
+    format_mean_std,
+    run_backtest,
+    run_rolling_backtest,
+    skill_summary,
+)
 from src.features.build import build_feature_frame  # noqa: E402
 from src.models.baselines import (  # noqa: E402
-    BiasCorrectedNWPForecaster,
     ClimatologyForecaster,
     MeanForecaster,
     PersistenceForecaster,
-    RawNWPForecaster,
     SeasonalNaiveForecaster,
 )
 from src.models.linear import RidgeForecaster  # noqa: E402
@@ -53,16 +66,11 @@ logger = logging.getLogger("pilot")
 DEFAULT_HORIZONS = (1, 3, 6, 12, 24, 48, 72)
 
 
-def build_model_factories(seed: int = 0, with_nwp: bool = False) -> dict:
+def build_model_factories(seed: int = 0) -> dict:
     """Model ladder for the pilot, cheapest first.
 
     LightGBM is included only if installed, so the pilot runs with the base
     requirements and gains a rung when the ML extras are present.
-
-    Args:
-        seed: Random seed for stochastic models.
-        with_nwp: Add the physics-forecast baselines. Requires an ``nwp_wvht``
-            column in the feature frame.
     """
     factories = {
         "mean": MeanForecaster,
@@ -71,10 +79,6 @@ def build_model_factories(seed: int = 0, with_nwp: bool = False) -> dict:
         "climatology": ClimatologyForecaster,
         "ridge": lambda: RidgeForecaster(alpha=1.0),
     }
-
-    if with_nwp:
-        factories["raw_nwp"] = RawNWPForecaster
-        factories["nwp_debiased"] = BiasCorrectedNWPForecaster
 
     try:
         from src.models.trees import LightGBMForecaster
@@ -89,223 +93,225 @@ def build_model_factories(seed: int = 0, with_nwp: bool = False) -> dict:
     return factories
 
 
-def load_observations(args) -> pd.DataFrame:
-    """Load the buoy record, real or synthetic."""
+def load_observations(station: str, years, args) -> pd.DataFrame:
+    """Load one station's record, real or synthetic."""
     if args.synthetic:
         from src.data.synthetic import generate_buoy_record
 
         logger.info("Generating synthetic record (NOT real data)")
         return generate_buoy_record(
-            start=f"{args.years[0]}-01-01", end=f"{args.years[-1] + 1}-01-01", seed=args.seed
+            start=f"{years[0]}-01-01", end=f"{years[-1] + 1}-01-01", seed=args.seed
         )
 
     from src.data.ndbc import coverage_report, load_station
 
-    station = NDBC_STATIONS.get(args.station)
+    info = NDBC_STATIONS.get(station)
     logger.info(
         "Loading NDBC %s (%s), years %s-%s",
-        args.station,
-        station.name if station else "unknown station",
-        args.years[0],
-        args.years[-1],
+        station,
+        info.name if info else "unknown station",
+        years[0],
+        years[-1],
     )
-    df = load_station(args.station, list(args.years), cache_dir=args.cache_dir)
+    df = load_station(station, list(years), cache_dir=args.cache_dir)
     logger.info("Coverage:\n%s", coverage_report(df).to_string())
     return df
 
 
-def load_nwp(args, observations, horizons) -> pd.DataFrame | None:
-    """Load physics-model forecasts to postprocess, if any were requested.
-
-    Returns:
-        DataFrame indexed by valid time with one column per horizon (``h1``,
-        ``h3``, ...), or None when running buoy-only.
-    """
-    if args.nwp_csv is None:
-        return None
-
-    if args.nwp_csv == "synthetic":
-        if not args.synthetic:
-            raise SystemExit("--nwp-csv synthetic requires --synthetic")
-        from src.data.synthetic import generate_nwp_forecast
-
-        logger.info("Generating synthetic NWP forecasts (NOT real data)")
-        return pd.DataFrame(
-            {
-                f"h{h}": generate_nwp_forecast(observations, h, seed=args.seed)
-                for h in horizons
-            }
+def run_station(station: str, years, horizons, args) -> pd.DataFrame:
+    """Run the full ladder for one station. Returns long-format records."""
+    observations = load_observations(station, years, args)
+    if args.target not in observations.columns:
+        raise SystemExit(
+            f"Target {args.target!r} not in data. Have: {list(observations.columns)}"
         )
 
-    logger.info("Loading NWP forecasts from %s", args.nwp_csv)
-    nwp = pd.read_csv(args.nwp_csv, parse_dates=["time"]).set_index("time")
-    if nwp.index.tz is None:
-        nwp.index = nwp.index.tz_localize("UTC")
+    logger.info("Building features")
+    features = build_feature_frame(observations)
+    target = observations[args.target]
 
-    missing = [f"h{h}" for h in horizons if f"h{h}" not in nwp.columns]
-    if missing:
-        raise SystemExit(f"{args.nwp_csv} is missing columns: {missing}")
-    return nwp
+    if args.rolling:
+        records = run_rolling_backtest(
+            features,
+            target,
+            horizons,
+            build_model_factories,
+            n_splits=args.n_splits,
+            test_size_days=args.test_size_days,
+            gap_hours=args.gap_hours,
+        )
+    else:
+        end_year = years[-1]
+        train_end = args.train_end or f"{end_year - 2}-12-31"
+        validation_end = args.validation_end or f"{end_year - 1}-12-31"
+        split = temporal_split(features.index, train_end, validation_end, args.gap_hours)
+        logger.info("Split:\n%s", split.summary().to_string())
 
-
-def run_backtest_with_nwp(
-    features, target, nwp, horizons, factories, split, gap_hours
-) -> pd.DataFrame:
-    """Backtest where each horizon gets its own NWP forecast column.
-
-    The physics forecast for a +24 h lead is a different number from the one for
-    +72 h, so the feature has to be swapped in per horizon rather than joined
-    once. Skill is scored against the raw NWP.
-    """
-    from src.eval.backtest import run_horizon
-    from src.eval.metrics import results_table
-
-    records = []
-    for horizon in horizons:
-        column = f"h{horizon}"
-        if column not in nwp.columns:
-            logger.warning("No NWP column %s, skipping horizon %sh", column, horizon)
-            continue
-
-        # The NWP forecast is valid at target time, so shift it back onto issue
-        # time: at issue time t the model knows the forecast for t + horizon.
-        forecast_at_issue = nwp[column].shift(-horizon)
-        horizon_features = features.assign(nwp_wvht=forecast_at_issue)
-
-        records.extend(
-            run_horizon(
-                horizon_features,
-                target,
-                horizon,
-                factories,
-                split,
-                gap_hours,
-                reference_factory=RawNWPForecaster,
+        if len(split.test) == 0:
+            raise SystemExit(
+                f"Empty test set. Data ends {features.index.max()}, but the split "
+                f"puts test after {validation_end}."
             )
+        table = run_backtest(
+            features, target, horizons,
+            build_model_factories(args.seed), split, args.gap_hours,
         )
-    return results_table(records)
+        records = table.reset_index() if not table.empty else pd.DataFrame()
+
+    if not records.empty:
+        records["station"] = station
+    return records
+
+
+def report_station(station: str, records: pd.DataFrame, rolling: bool) -> None:
+    """Print the result tables for one station."""
+    info = NDBC_STATIONS.get(station)
+    label = f"NDBC {station} ({info.name if info else 'unknown'})"
+
+    print("\n" + "=" * 78)
+    print(label + ("   [rolling-origin, mean ± std across folds]" if rolling else ""))
+    print("=" * 78)
+
+    if rolling:
+        print("\nRMSE by horizon (metres, lower is better)")
+        print(format_mean_std(records, "rmse").to_string())
+        print("\nSkill vs persistence (fraction of RMSE removed, higher is better)")
+        print(format_mean_std(records, "skill_vs_reference").to_string())
+        print("\nStorm RMSE, top 10% of observed sea states (metres)")
+        print(format_mean_std(records, "rmse_p90").to_string())
+        summary = aggregate_folds(records, "rmse")["mean"].unstack("model")
+    else:
+        indexed = records.set_index(["horizon", "model"])
+        print("\nRMSE by horizon (metres, lower is better)")
+        print(skill_summary(indexed, "rmse").round(3).to_string())
+        print("\nSkill vs persistence (fraction of RMSE removed, higher is better)")
+        print(skill_summary(indexed, "skill_vs_reference").round(3).to_string())
+        print("\nStorm RMSE, top 10% of observed sea states (metres)")
+        print(skill_summary(indexed, "rmse_p90").round(3).to_string())
+        summary = skill_summary(indexed, "rmse")
+
+    # Compare against the best baseline, not just persistence. At long leads
+    # climatology becomes competitive, and a model that only beats persistence
+    # there has not learned anything a seasonal average does not already know.
+    baselines = [c for c in ("persistence", "climatology", "seasonal_naive", "mean")
+                 if c in summary.columns]
+    candidates = [c for c in summary.columns if c not in baselines]
+    if not candidates:
+        return
+
+    print("\nBest model vs best baseline, per horizon")
+    for horizon in summary.index:
+        best_baseline = summary.loc[horizon, baselines].idxmin()
+        baseline_rmse = summary.loc[horizon, best_baseline]
+        best_model = summary.loc[horizon, candidates].idxmin()
+        model_rmse = summary.loc[horizon, best_model]
+        gain = 1 - model_rmse / baseline_rmse
+        verdict = "" if gain > 0.02 else "   <- no real gain over the baseline"
+        print(
+            f"  +{horizon:>3}h  {best_model:<10} {model_rmse:.3f}  vs  "
+            f"{best_baseline:<14} {baseline_rmse:.3f}   {gain:+.1%}{verdict}"
+        )
+
+
+def report_cross_station(all_records: pd.DataFrame, rolling: bool) -> None:
+    """Compare stations side by side, to see whether skill replicates."""
+    stations = all_records["station"].unique()
+    if len(stations) < 2:
+        return
+
+    print("\n" + "=" * 78)
+    print("CROSS-STATION: ridge skill vs persistence")
+    print("=" * 78)
+    print("Skill that does not replicate across stations is not a property of the coast.\n")
+
+    ridge = all_records[all_records["model"] == "ridge"]
+    if ridge.empty:
+        return
+    table = ridge.groupby(["horizon", "station"])["skill_vs_reference"].mean().unstack("station")
+    print(table.round(3).to_string())
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--station", default="46041", help="NDBC station id")
-    parser.add_argument("--years", default="2015-2023", help="Inclusive year range, e.g. 2015-2023")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--station", default=None, help="Single NDBC station id")
+    parser.add_argument(
+        "--stations",
+        default=None,
+        help="Comma-separated station ids, e.g. 46041,46087,46029",
+    )
+    parser.add_argument("--years", default="2015-2023", help="Inclusive year range")
     parser.add_argument("--target", default="WVHT", help="Column to forecast")
     parser.add_argument(
         "--horizons",
         default=",".join(str(h) for h in DEFAULT_HORIZONS),
         help="Comma-separated lead times in hours",
     )
-    parser.add_argument("--train-end", default=None, help="Last training timestamp")
-    parser.add_argument("--validation-end", default=None, help="Last validation timestamp")
+    parser.add_argument(
+        "--no-rolling",
+        dest="rolling",
+        action="store_false",
+        help="Use a single fixed split instead of rolling-origin folds",
+    )
+    parser.add_argument("--n-splits", type=int, default=4, help="Rolling-origin folds")
+    parser.add_argument(
+        "--test-size-days", type=int, default=180, help="Length of each test window"
+    )
+    parser.add_argument("--train-end", default=None, help="Fixed-split training cutoff")
+    parser.add_argument("--validation-end", default=None, help="Fixed-split validation cutoff")
     parser.add_argument("--gap-hours", type=int, default=72, help="Buffer between splits")
     parser.add_argument("--cache-dir", default="data/raw/ndbc")
     parser.add_argument("--output-dir", default="results/pilot")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--synthetic", action="store_true", help="Use synthetic data (no network)")
-    parser.add_argument(
-        "--nwp-csv",
-        default=None,
-        help=(
-            "CSV of physics-model forecasts to postprocess. Needs a 'time' column "
-            "(the valid time, UTC) plus one column per horizon named 'h1', 'h3', ... "
-            "With --synthetic, pass 'synthetic' to generate one."
-        ),
-    )
+    parser.add_argument("--synthetic", action="store_true", help="Use synthetic data")
     parser.add_argument("--log-level", default="INFO")
+    parser.set_defaults(rolling=True)
     args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=args.log_level, format="%(asctime)s %(levelname)-7s %(message)s"
     )
 
-    start_year, end_year = (int(y) for y in args.years.split("-"))
-    args.years = range(start_year, end_year + 1)
-    horizons = [int(h) for h in args.horizons.split(",")]
-
-    observations = load_observations(args)
-    if args.target not in observations.columns:
-        parser.error(f"Target {args.target!r} not in data. Have: {list(observations.columns)}")
-
-    logger.info("Building features")
-    features = build_feature_frame(observations)
-    target = observations[args.target]
-
-    # Default to the last full year as test and the one before it as validation.
-    train_end = args.train_end or f"{end_year - 2}-12-31"
-    validation_end = args.validation_end or f"{end_year - 1}-12-31"
-    split = temporal_split(features.index, train_end, validation_end, args.gap_hours)
-    logger.info("Split:\n%s", split.summary().to_string())
-
-    if len(split.test) == 0:
-        parser.error(
-            f"Empty test set. Data ends {features.index.max()}, but the split puts "
-            f"test after {validation_end}. Pass --train-end/--validation-end."
-        )
-
-    nwp = load_nwp(args, observations, horizons)
-    factories = build_model_factories(args.seed, with_nwp=nwp is not None)
-    logger.info("Models: %s", ", ".join(factories))
-
-    if nwp is None:
-        results = run_backtest(
-            features, target, horizons, factories, split, args.gap_hours
-        )
+    if args.stations:
+        stations = [s.strip() for s in args.stations.split(",") if s.strip()]
     else:
-        # Skill is measured against the physics forecast, not persistence: the
-        # claim under test is "we improve on the NWP", and persistence would
-        # make it look far easier than it is.
-        results = run_backtest_with_nwp(
-            features, target, nwp, horizons, factories, split, args.gap_hours
-        )
+        stations = [args.station or "46041"]
 
-    if results.empty:
-        logger.error("No results produced")
-        return 1
+    start_year, end_year = (int(y) for y in args.years.split("-"))
+    years = range(start_year, end_year + 1)
+    horizons = [int(h) for h in args.horizons.split(",")]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    tag = "synthetic" if args.synthetic else args.station
-    results.to_csv(output_dir / f"pilot_{tag}_results.csv")
 
-    print("\n" + "=" * 78)
-    if args.synthetic:
-        print("SYNTHETIC DATA - these numbers are not results, only a pipeline check")
-    else:
-        station = NDBC_STATIONS.get(args.station)
-        print(f"NDBC {args.station} ({station.name if station else 'unknown'})")
-    print("=" * 78)
+    collected = []
+    for station in stations:
+        try:
+            records = run_station(station, years, horizons, args)
+        except Exception as e:
+            # One bad station must not lose the results for the others.
+            logger.error("Station %s failed: %s", station, e)
+            continue
 
-    reference_name = "raw NWP" if nwp is not None else "persistence"
+        if records.empty:
+            logger.error("Station %s produced no results", station)
+            continue
 
-    print("\nRMSE by horizon (metres, lower is better)")
-    print(skill_summary(results, "rmse").round(3).to_string())
+        report_station(station, records, args.rolling)
+        collected.append(records)
 
-    print(f"\nSkill vs {reference_name} (fraction of RMSE removed, higher is better)")
-    print(skill_summary(results, "skill_vs_reference").round(3).to_string())
+    if not collected:
+        logger.error("No results produced for any station")
+        return 1
 
-    print("\nStorm RMSE, top 10% of observed sea states (metres)")
-    print(skill_summary(results, "rmse_p90").round(3).to_string())
+    all_records = pd.concat(collected, ignore_index=True)
+    report_cross_station(all_records, args.rolling)
 
-    print("\nBias (metres, positive = forecast runs high)")
-    print(skill_summary(results, "bias").round(3).to_string())
-
-    # The reference itself always scores exactly zero, so drop it before
-    # picking a winner.
-    reference_label = "raw_nwp" if nwp is not None else "persistence"
-    best = (
-        results["skill_vs_reference"]
-        .drop(reference_label, level="model", errors="ignore")
-        .groupby("horizon")
-        .idxmax()
-    )
-    print(f"\nBest model per horizon (vs {reference_name})")
-    for horizon, key in best.dropna().items():
-        skill = results.loc[key, "skill_vs_reference"]
-        verdict = "" if skill > 0 else "   <- no model beat the reference"
-        print(f"  +{horizon:>3}h  {key[1]:<16} {skill:+.1%}{verdict}")
-
-    print(f"\nWritten to {output_dir / f'pilot_{tag}_results.csv'}")
+    tag = "synthetic" if args.synthetic else "-".join(stations)
+    path = output_dir / f"pilot_{tag}_results.csv"
+    all_records.to_csv(path, index=False)
+    print(f"\nWritten to {path}")
     return 0
 
 

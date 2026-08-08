@@ -172,6 +172,14 @@ def build_feature_frame(
     out = add_lag_features(out, lag_columns, lags)
     out = add_rolling_features(out, [c for c in ("WVHT", "WSPD") if c in out.columns], windows)
     out = add_calendar_features(out)
+
+    # Drop columns with no observed values at all. NDBC publishes a fixed
+    # column set, so a station that has no visibility or tide sensor still
+    # emits VIS and TIDE - entirely empty. They carry no information, and an
+    # all-NaN column cannot be imputed (sklearn warns and silently skips it).
+    empty = [c for c in out.columns if out[c].isna().all()]
+    if empty:
+        out = out.drop(columns=empty)
     return out
 
 

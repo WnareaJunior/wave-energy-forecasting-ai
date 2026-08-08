@@ -14,15 +14,10 @@ on:
   workflow_dispatch:
     inputs:
       station:
-        description: "NDBC station id (46041 Cape Elizabeth, 46087 Neah Bay, 46029 Columbia River)"
+        description: "Comma-separated NDBC stations (46041 Cape Elizabeth, 46087 Neah Bay, 46029 Columbia River)"
         required: true
-        default: "46041"
-        type: choice
-        options:
-          - "46041"
-          - "46087"
-          - "46029"
-          - "46005"
+        default: "46041,46087,46029"
+        type: string
       years:
         description: "Inclusive year range, e.g. 2015-2023"
         required: true
@@ -53,7 +48,7 @@ permissions:
 # The `inputs` context is only populated for workflow_dispatch. On a push it is
 # empty, so every use needs a fallback or the job runs with blank arguments.
 env:
-  STATION: ${{ inputs.station || '46041' }}
+  STATION: ${{ inputs.station || '46041,46087,46029' }}
   YEARS: ${{ inputs.years || '2015-2023' }}
   HORIZONS: ${{ inputs.horizons || '1,3,6,12,24,48,72' }}
 
@@ -99,9 +94,9 @@ jobs:
       - name: Run pilot
         run: |
           set -o pipefail
-          echo "Station: $STATION   Years: $YEARS   Horizons: $HORIZONS"
+          echo "Stations: $STATION   Years: $YEARS   Horizons: $HORIZONS"
           python experiments/pilot_ndbc.py \
-            --station "$STATION" \
+            --stations "$STATION" \
             --years "$YEARS" \
             --horizons "$HORIZONS" 2>&1 | tee pilot.log
 
@@ -109,7 +104,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "# Buoy pilot: NDBC $STATION, $YEARS"
+            echo "# Buoy pilot: NDBC $STATION, $YEARS (rolling-origin)"
             echo
             echo '```'
             cat pilot.log 2>/dev/null || echo "no output captured"
@@ -120,7 +115,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pilot-${{ inputs.station || '46041' }}-${{ inputs.years || '2015-2023' }}
+          # Fixed name: the station list is comma-separated and would make an
+          # awkward (and possibly invalid) artifact name.
+          name: pilot-results-run${{ github.run_number }}
           path: |
             results/
             pilot.log
