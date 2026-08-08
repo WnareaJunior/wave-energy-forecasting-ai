@@ -8,13 +8,20 @@ silently pulls the wrong field.
 The bucket is public, so no credentials are needed - requests are unsigned.
 
 What it reports:
-  1. the prefix tree, a few levels deep
-  2. sample object keys with sizes
-  3. the contents of one GRIB2 file: variables, dimensions, coordinates, and
-     crucially how initialisation time, lead time and ensemble member are
-     encoded, since those determine how a forecast is aligned to a valid time
+  1. the text of the archive's own description PDF, which sits at the bucket
+     root and is the authoritative account of what is stored and how
+  2. the prefix tree, skipping the static grid-info branch
+  3. the smallest GRIB2 forecast file's contents: variables, dimensions and
+     coordinates, and crucially how initialisation time, lead time and ensemble
+     member are encoded, since those determine how a forecast is aligned to a
+     valid time
   4. the value at the nearest grid point to NDBC 46041, as a sanity check that
      the field is wave height in metres and not something else
+
+Exits non-zero if it fails to describe a forecast file. A discovery run that
+learns nothing must not report success - the first version of this script
+swallowed the failure, returned 0, and produced a green check next to an empty
+result.
 
 Usage::
 
@@ -33,8 +40,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 BUCKET = "noaa-nws-gefswaves-reforecast-pds"
 
+#: The archive's own documentation, at the bucket root.
+DESCRIPTION_KEY = "Description_of_reforecast_data.pdf"
+
+#: Only these are forecast data. The first version of this script also matched
+#: ".nc", picked up a 162 MB grid-info NetCDF, and spent eight minutes failing
+#: to parse it as GRIB2.
+GRIB_EXTENSIONS = (".grib2", ".grb2", ".grb")
+
+#: Static ancillary data - bathymetry, coastline distance, shapefiles. Large,
+#: and nothing to do with forecasts. Descending into it wastes the walk.
+SKIP_PREFIX_PARTS = ("gridinfo", "shapefile")
+
 #: Do not download anything larger than this when sampling a file.
-MAX_SAMPLE_BYTES = 400 * 1024 * 1024
+MAX_SAMPLE_BYTES = 200 * 1024 * 1024
 
 
 def make_client():
@@ -46,7 +65,12 @@ def make_client():
     return boto3.client("s3", config=Config(signature_version=UNSIGNED))
 
 
-def list_level(s3, prefix: str, max_items: int = 25):
+def should_skip(prefix: str) -> bool:
+    lowered = prefix.lower()
+    return any(part in lowered for part in SKIP_PREFIX_PARTS)
+
+
+def list_level(s3, prefix: str, max_keys: int = 12):
     """One level of the key hierarchy: (sub-prefixes, [(key, size), ...])."""
     paginator = s3.get_paginator("list_objects_v2")
     prefixes: list[str] = []
@@ -55,70 +79,130 @@ def list_level(s3, prefix: str, max_items: int = 25):
     for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix, Delimiter="/"):
         prefixes.extend(p["Prefix"] for p in page.get("CommonPrefixes", []))
         keys.extend((o["Key"], o["Size"]) for o in page.get("Contents", []))
-        if len(prefixes) >= max_items and len(keys) >= max_items:
+        if len(keys) >= max_keys:
             break
 
-    return prefixes[:max_items], keys[:max_items]
+    return prefixes, keys[:max_keys]
 
 
-def walk(s3, prefix: str = "", depth: int = 0, max_depth: int = 4) -> str | None:
-    """Print the prefix tree and return the first data file key found."""
+def walk(s3, prefix: str = "", depth: int = 0, max_depth: int = 5, found=None) -> list:
+    """Print the prefix tree and collect every GRIB2 file seen.
+
+    Descends one representative path per level but prints all sibling prefixes,
+    so the naming convention is visible even where the walk does not recurse.
+    Unlike the first version, finding a file does not stop the walk - that bug
+    meant the grid-info branch short-circuited it before it ever reached the
+    reforecast data.
+    """
+    found = [] if found is None else found
     indent = "  " * depth
     prefixes, keys = list_level(s3, prefix)
 
-    for key, size in keys[:5]:
-        print(f"{indent}[file] {key}  ({size / 1e6:.1f} MB)")
-
-    first_file = None
-    if keys:
-        data_files = [
-            (k, s) for k, s in keys if k.endswith((".grib2", ".grb2", ".nc", ".zarr"))
-        ]
-        if data_files:
-            first_file = data_files[0][0]
+    for key, size in keys[:6]:
+        marker = " <-- GRIB" if key.endswith(GRIB_EXTENSIONS) else ""
+        print(f"{indent}[file] {key}  ({size / 1e6:.1f} MB){marker}")
+        if key.endswith(GRIB_EXTENSIONS):
+            found.append((key, size))
+    if len(keys) > 6:
+        print(f"{indent}... and more files at this level")
 
     if depth >= max_depth:
         if prefixes:
-            print(f"{indent}... {len(prefixes)} more prefixes, not descending further")
-        return first_file
+            print(f"{indent}... {len(prefixes)} prefixes below, not descending")
+        return found
 
-    for sub in prefixes[:6]:
+    # Print every sibling so the naming convention is visible.
+    for sub in prefixes[:10]:
         print(f"{indent}{sub}")
-        found = walk(s3, sub, depth + 1, max_depth)
-        first_file = first_file or found
-        # One complete path down the tree is enough to learn the layout.
-        if found and depth >= 1:
+    if len(prefixes) > 10:
+        print(f"{indent}... and {len(prefixes) - 10} more prefixes at this level")
+
+    # Descend into the interesting ones only.
+    descendable = [p for p in prefixes if not should_skip(p)]
+    for sub in descendable[:3]:
+        print(f"{indent}--> descending into {sub}")
+        walk(s3, sub, depth + 1, max_depth, found)
+        # One full path to a GRIB file is enough to learn the convention.
+        if found:
             break
 
-    if len(prefixes) > 6:
-        print(f"{indent}... and {len(prefixes) - 6} more at this level")
+    skipped = [p for p in prefixes if should_skip(p)]
+    if skipped:
+        print(f"{indent}(skipping static ancillary data: {', '.join(skipped)})")
 
-    return first_file
+    return found
 
 
-def describe_grib(path: Path) -> None:
-    """Open a GRIB2 file and print everything needed to write the extractor."""
+def print_description(s3) -> None:
+    """Download and print the archive's own description PDF.
+
+    This is the authoritative account of what the archive contains, and reading
+    it costs 0.2 MB.
+    """
+    print("\n" + "=" * 78)
+    print(f"ARCHIVE DOCUMENTATION: {DESCRIPTION_KEY}")
+    print("=" * 78)
+
+    local = Path("/tmp") / DESCRIPTION_KEY
+    try:
+        s3.download_file(BUCKET, DESCRIPTION_KEY, str(local))
+    except Exception as e:
+        print(f"Could not download: {type(e).__name__}: {e}")
+        return
+
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(local))
+        for i, page in enumerate(reader.pages):
+            text = (page.extract_text() or "").strip()
+            if text:
+                print(f"\n--- page {i + 1} ---")
+                print(text)
+    except Exception as e:
+        print(f"Could not extract text: {type(e).__name__}: {e}")
+    finally:
+        if local.exists():
+            os.remove(local)
+
+
+def describe_file(path: Path) -> bool:
+    """Open a data file and print everything needed to write the extractor.
+
+    Returns True if at least one dataset was opened.
+    """
     import xarray as xr
 
     print("\n" + "=" * 78)
     print(f"CONTENTS OF {path.name}")
     print("=" * 78)
 
+    # Dispatch by extension. The first version always used cfgrib, so a NetCDF
+    # sample could not possibly open.
+    engine = "cfgrib" if path.suffix in GRIB_EXTENSIONS else None
+
     datasets = []
     try:
-        datasets = [xr.open_dataset(path, engine="cfgrib")]
+        datasets = [xr.open_dataset(path, engine=engine)]
     except Exception as e:
-        # GRIB2 files often hold messages on several level types, which cfgrib
-        # cannot merge into one dataset. open_datasets splits them instead.
         print(f"Single-dataset open failed ({type(e).__name__}: {e})")
-        print("Retrying with cfgrib.open_datasets()\n")
-        try:
-            import cfgrib
+        if engine == "cfgrib":
+            # GRIB2 files often hold messages on several level types, which
+            # cfgrib cannot merge into one dataset.
+            print("Retrying with cfgrib.open_datasets()\n")
+            try:
+                import cfgrib
 
-            datasets = cfgrib.open_datasets(str(path))
-        except Exception as e2:
-            print(f"open_datasets also failed: {type(e2).__name__}: {e2}")
-            return
+                datasets = cfgrib.open_datasets(str(path))
+            except Exception as e2:
+                print(f"open_datasets also failed: {type(e2).__name__}: {e2}")
+                return False
+        else:
+            return False
+
+    if not datasets:
+        print("No datasets found in file")
+        return False
 
     print(f"{len(datasets)} dataset(s) in this file\n")
 
@@ -132,8 +216,7 @@ def describe_grib(path: Path) -> None:
             if name in ds.coords:
                 values = ds[name].values
                 flat = values.reshape(-1) if values.ndim else [values]
-                head = flat[:4]
-                print(f"  {name}: shape={values.shape} first={head}")
+                print(f"  {name}: shape={values.shape} first={flat[:4]}")
                 if name in ("latitude", "longitude") and len(flat) > 1:
                     print(f"    range {flat.min()} .. {flat.max()}, n={len(flat)}")
 
@@ -146,6 +229,7 @@ def describe_grib(path: Path) -> None:
         print()
 
     _sample_at_buoy(datasets)
+    return True
 
 
 def _sample_at_buoy(datasets) -> None:
@@ -192,52 +276,66 @@ def _sample_at_buoy(datasets) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", default="", help="Prefix to start walking from")
-    parser.add_argument("--max-depth", type=int, default=4)
+    parser.add_argument("--max-depth", type=int, default=5)
     parser.add_argument(
         "--open-sample",
         action="store_true",
-        help="Download one data file and describe its contents",
+        help="Download the smallest GRIB2 file found and describe its contents",
+    )
+    parser.add_argument(
+        "--skip-docs", action="store_true", help="Skip the description PDF"
     )
     args = parser.parse_args(argv)
 
     s3 = make_client()
 
-    print("=" * 78)
+    if not args.skip_docs:
+        print_description(s3)
+
+    print("\n" + "=" * 78)
     print(f"BUCKET s3://{BUCKET}")
     print("=" * 78)
 
     try:
-        first_file = walk(s3, args.prefix, max_depth=args.max_depth)
+        candidates = walk(s3, args.prefix, max_depth=args.max_depth)
     except Exception as e:
         print(f"Listing failed: {type(e).__name__}: {e}")
         return 1
 
-    if not first_file:
-        print("\nNo data file found while walking. Widen --max-depth or set --prefix.")
+    if not candidates:
+        print(
+            "\nFAILED: no GRIB2 file found while walking. "
+            "Increase --max-depth, or set --prefix to a known data path."
+        )
         return 1
 
-    print(f"\nFirst data file found: {first_file}")
+    # Smallest first: the point is to learn the schema, not to move bytes.
+    candidates.sort(key=lambda item: item[1])
+    key, size = candidates[0]
+    print(f"\nFound {len(candidates)} GRIB2 file(s); smallest is:")
+    print(f"  {key}  ({size / 1e6:.1f} MB)")
 
     if not args.open_sample:
         print("\nRe-run with --open-sample to download and inspect it.")
         return 0
 
-    head = s3.head_object(Bucket=BUCKET, Key=first_file)
-    size = head["ContentLength"]
-    print(f"Size: {size / 1e6:.1f} MB")
     if size > MAX_SAMPLE_BYTES:
-        print(f"Larger than the {MAX_SAMPLE_BYTES / 1e6:.0f} MB sample cap, skipping.")
-        return 0
+        print(f"\nFAILED: larger than the {MAX_SAMPLE_BYTES / 1e6:.0f} MB sample cap.")
+        return 1
 
-    local = Path("/tmp") / Path(first_file).name
+    local = Path("/tmp") / Path(key).name
     print(f"Downloading to {local}")
-    s3.download_file(BUCKET, first_file, str(local))
+    s3.download_file(BUCKET, key, str(local))
 
     try:
-        describe_grib(local)
+        described = describe_file(local)
     finally:
         if local.exists():
             os.remove(local)
+
+    if not described:
+        print("\nFAILED: could not open the sample file.")
+        return 1
 
     return 0
 
