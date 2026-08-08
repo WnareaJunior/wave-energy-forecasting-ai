@@ -56,10 +56,18 @@ def skill_score(y_true, y_pred, y_reference) -> float:
 
 def correlation(y_true, y_pred) -> float:
     """Pearson correlation. High correlation with large bias is a calibration
-    problem, not a signal problem - worth distinguishing."""
+    problem, not a signal problem - worth distinguishing.
+
+    Returns NaN when either series is constant. Correlation is genuinely
+    undefined there, and the constant case is not exotic: the mean forecaster
+    predicts one value by construction, so letting numpy divide by a zero
+    standard deviation would emit a RuntimeWarning on every single fold.
+    """
     y_true, y_pred = np.asarray(y_true, float), np.asarray(y_pred, float)
     mask = ~(np.isnan(y_true) | np.isnan(y_pred))
     if mask.sum() < 2:
+        return float("nan")
+    if np.std(y_true[mask]) == 0 or np.std(y_pred[mask]) == 0:
         return float("nan")
     return float(np.corrcoef(y_true[mask], y_pred[mask])[0, 1])
 

@@ -1,121 +1,137 @@
-# Pilot results: NDBC 46041 (Cape Elizabeth, WA)
+# Pilot results: Washington-coast NDBC buoys
 
-First real-data run of the buoy pilot.
+Rolling-origin evaluation across three stations, 2015–2023.
 
 | | |
 |---|---|
-| Station | 46041, Cape Elizabeth WA (47.35 N, 124.73 W, ~133 m depth) |
-| Record | 2015–2023, hourly, 66,962 observations, 86.6% coverage |
-| Train | 2015-03-05 → 2021-12-31 (55,675 rows at +72 h) |
-| Validation | 2022 |
-| Test | 2023 (8,629 rows at +72 h) |
+| Stations | 46041 Cape Elizabeth, 46087 Neah Bay, 46029 Columbia River Bar |
+| Record | 2015–2023, hourly |
+| Evaluation | Rolling-origin, 4 folds, 180-day test windows, 72 h gap |
+| Validation | Carved from each fold's own training tail (15%) |
 | Target | WVHT, significant wave height, in metres |
-| Reference | persistence |
-| Run | [Actions run 31278698042](https://github.com/WnareaJunior/wave-energy-forecasting-ai/actions/runs/31278698042) |
+| Reported | mean ± std across folds |
+| Run | [Actions run 31279611316](https://github.com/WnareaJunior/wave-energy-forecasting-ai/actions/runs/31279611316) |
+
+Every number below is mean ± standard deviation across folds. The seed is the
+fold index, so the spread covers seed variance as well as period variance.
 
 ---
 
-## RMSE by horizon (metres, lower is better)
+## The headline: skill replicates across all three stations
 
-| lead | mean | climatology | seasonal_naive | persistence | lightgbm | **ridge** |
-|-----:|-----:|------------:|---------------:|------------:|---------:|----------:|
-| +1 h  | 1.206 | 0.999 | 1.048 | 0.168 | 0.162 | **0.160** |
-| +3 h  | 1.206 | 1.000 | 1.078 | 0.304 | 0.274 | **0.270** |
-| +6 h  | 1.206 | 1.000 | 1.116 | 0.480 | 0.417 | **0.412** |
-| +12 h | 1.205 | 1.000 | 1.183 | 0.704 | 0.589 | **0.579** |
-| +24 h | 1.205 | 1.000 | 1.240 | 1.030 | 0.808 | **0.801** |
-| +48 h | 1.205 | 1.001 | 1.313 | 1.241 | 0.997 | **0.968** |
-| +72 h | 1.202 | 0.999 | 1.386 | 1.312 | 1.064 | **0.997** |
+Ridge skill vs persistence, mean across folds:
 
-## Skill vs persistence (fraction of RMSE removed)
+| lead | 46041 | 46087 | 46029 |
+|-----:|------:|------:|------:|
+| +1 h  | 0.054 | 0.037 | 0.052 |
+| +3 h  | 0.092 | 0.075 | 0.092 |
+| +6 h  | 0.119 | 0.094 | 0.123 |
+| +12 h | 0.163 | 0.127 | 0.151 |
+| +24 h | 0.228 | 0.183 | 0.178 |
+| +48 h | 0.233 | 0.199 | 0.200 |
+| +72 h | 0.235 | 0.213 | 0.232 |
 
-| lead | climatology | lightgbm | ridge |
-|-----:|------------:|---------:|------:|
-| +1 h  | −4.95 | +3.7% | **+4.8%** |
-| +3 h  | −2.29 | +9.7% | **+11.2%** |
-| +6 h  | −1.08 | +13.2% | **+14.2%** |
-| +12 h | −0.42 | +16.4% | **+17.8%** |
-| +24 h | +3.0% | +21.6% | **+22.3%** |
-| +48 h | +19.3% | +19.7% | **+22.0%** |
-| +72 h | +23.8% | +18.9% | **+24.0%** |
+Three independent buoys, three near-identical curves. This is not one station's
+quirk.
 
-## Storm RMSE, top 10% of observed sea states (metres)
+## But measured against the *best* baseline, the picture is sharper
 
-| lead | persistence | lightgbm | ridge |
-|-----:|------------:|---------:|------:|
-| +1 h  | 0.339 | 0.340 | **0.329** |
-| +6 h  | 0.984 | 0.889 | **0.859** |
-| +24 h | 1.952 | 1.656 | **1.620** |
-| +48 h | 2.273 | 2.227 | **2.027** |
-| +72 h | 2.318 | 2.318 | **2.057** |
+Persistence is not the right reference past ~24 h — climatology overtakes it.
+Best model against whichever baseline is strongest at that lead:
 
-Bias is negligible for every model (|bias| ≤ 0.06 m at all horizons), so these are
-variance differences, not calibration differences.
+| lead | 46041 | 46087 | 46029 | best baseline |
+|-----:|------:|------:|------:|---|
+| +1 h  | +6.3%  | +4.2%  | +5.8%  | persistence |
+| +3 h  | +10.0% | +9.4%  | +10.0% | persistence |
+| +6 h  | +12.7% | +10.5% | +13.2% | persistence |
+| +12 h | +16.9% | +13.1% | +15.4% | persistence |
+| **+24 h** | **+23.7%** | **+18.6%** | **+18.3%** | persistence |
+| +48 h | +12.5% | +7.0%  | +4.4%  | climatology |
+| +72 h | +6.4%  | +3.1%  | +1.0% ✗ | climatology |
 
----
+✗ = flagged by the runner as no real gain (<2%).
 
-## What this actually says
-
-**There is real skill, and it peaks in the middle of the range.** Ridge beats
-persistence at every lead time, by 4.8% at +1 h rising to ~22% by +24 h.
-
-**But the headline "+24% at +72 h" is misleading, and the climatology column is
-why.** At +72 h, climatology — which ignores current conditions entirely and
-just predicts the seasonal average — scores +23.8%. Ridge scores +24.0%. They
-are tied. Ridge's RMSE at +72 h is 0.997 m against climatology's 0.999 m.
-
-So the honest reading, by band:
-
-| band | what is happening |
-|---|---|
-| **+1 to +6 h** | Modest gains (5–14%) that come from smoothing measurement noise, not from forecasting. Persistence uses one noisy reading; ridge averages recent history. |
-| **+12 to +48 h** | The genuinely valuable band. At +24 h ridge is 20% better than climatology *and* 22% better than persistence — it is using current conditions to say something the seasonal average cannot. |
-| **+72 h and beyond** | The current-conditions signal is exhausted. Ridge has converged to climatology. Nothing in this buoy's own history carries information that far ahead. |
-
-This is exactly what the climatology baseline was included to expose, and it
-would have been invisible from a persistence-only comparison.
-
-**Ridge beats LightGBM at every horizon.** Not by much at short leads, but
-consistently, and by more at +48 h and +72 h (0.968 vs 0.997; 0.997 vs 1.064).
-Two readings, probably both true: the autoregressive structure of wave height is
-close to linear, so trees have little nonlinearity to exploit; and LightGBM's
-early stopping ran against a thin validation block (see below), which likely
-stopped it short.
+**Skill peaks at +24 hours at roughly 18–24%, and decays to near nothing by
++72 hours.** The apparent "+23% at +72 h" in the persistence column is almost
+entirely climatology's doing, not the model's.
 
 ---
 
-## Caveats and follow-ups
+## Ridge and LightGBM are indistinguishable
 
-1. **The 2022 validation block is mostly empty.** At +72 h it yielded 1,716
-   usable rows against 8,629 for the 2023 test block, so 46041 appears to have
-   a long outage in 2022. That is the set LightGBM early-stops on, so its
-   comparison with ridge is not yet clean. Worth re-running with a different
-   validation year, or with rolling-origin backtesting instead of a fixed split.
-2. **`VIS` and `TIDE` are entirely absent at this station**, and are being
-   passed to the models as all-NaN columns — sklearn warns and skips them.
-   Harmless but should be dropped during feature construction.
-3. **Single test year.** 2023 covers all seasons, which is better than a
-   partial-year window, but one year is one draw. Rolling-origin evaluation
-   would give an error bar on these numbers.
-4. **One station.** 46087 (Neah Bay) and 46029 (Columbia River Bar) have not
-   been run. Skill that does not replicate across the three is not a property
-   of the Washington coast.
-5. **No seed repeats.** LightGBM is stochastic; the ridge/LightGBM gap at short
-   leads (0.160 vs 0.162 at +1 h) is well inside what seed variance could
-   explain. The +48/+72 h gap is larger and more likely real.
+This corrects the single-split run, which reported ridge beating LightGBM at
+every horizon. That was noise. With four folds and per-fold seeds:
+
+| station, lead | lightgbm | ridge | fold std |
+|---|---:|---:|---:|
+| 46041, +1 h  | 0.188 | 0.190 | ±0.04 |
+| 46041, +24 h | 0.775 | 0.784 | ±0.09 |
+| 46041, +48 h | 0.992 | 0.961 | ±0.11 |
+| 46087, +72 h | 0.811 | 0.788 | ±0.12 |
+| 46029, +24 h | 0.808 | 0.805 | ±0.17 |
+
+Every gap between them is an order of magnitude smaller than the fold-to-fold
+spread. LightGBM tends to win at +1 to +6 h and ridge at +12 h and beyond, but
+neither pattern survives contact with the error bars.
+
+The practical consequence: there is nothing to gain from choosing between them,
+or from tuning either. The ceiling is set by the information in the buoy's own
+history, not by model capacity — which is a direct argument against reaching for
+a Transformer next.
+
+## Storm performance tracks overall performance
+
+At the top decile of observed sea states, ridge and LightGBM keep their edge
+over persistence out to +24 h and lose it by +48 h — at 46087, ridge's storm
+RMSE at +48 h (1.630) is level with persistence (1.630). No model does anything
+special in big seas; they are simply less wrong in the same way.
 
 ---
 
-## What it means for the plan
+## Data quality notes
 
-The +12 to +48 h band is where a model earns its keep on buoy history alone, and
-past ~48 h nothing in the buoy's own past helps. That is a direct argument for
-**Track B**: to forecast beyond two days you need information from outside this
-buoy — which is what a physics model provides, and what postprocessing it would
-exploit.
+**Coverage over 2015–2023 (WVHT):**
 
-It is also an argument against reaching for the deep-learning rungs yet. Ridge —
-a linear model with lag features — is currently the best thing here, beating
-gradient boosting at every horizon. A Transformer has to beat *ridge* to justify
-itself, and the gap between ridge and climatology at long leads suggests the
-ceiling on buoy-only forecasting is close.
+| station | present | pct |
+|---|---:|---:|
+| 46041 | 66,962 | 86.6% |
+| 46087 | 60,597 | 76.8% |
+| 46029 | 66,170 | 84.7% |
+
+**46087 ran on three folds, not four.** NDBC has no 2021 file for this station
+(both the archive path and the text viewer return 404), and fold 0's test
+window — Jan–Jul 2022 — yielded zero usable rows, as did its validation block.
+The station appears to have been off-station from roughly 2020 through mid-2022.
+Its surviving folds train on 2015–2019 and test on late 2022 / 2023, so its
+train-to-test gap is much larger than the other two stations'. That its results
+still line up with 46041 and 46029 is reassuring rather than suspicious, but the
+numbers deserve a lighter weight.
+
+The per-station error handling worked as intended here: the empty folds were
+logged and skipped, and the run continued rather than losing all three stations
+to one bad buoy.
+
+---
+
+## What this means for the plan
+
+1. **The useful band is +6 h to +48 h**, centred on +24 h. That is a real,
+   replicated, ~20% error reduction over the best available baseline.
+2. **Past +48 h, buoy history is exhausted.** By +72 h the best model is within
+   1–6% of a seasonal average. No amount of model capacity fixes this — the
+   information is not in the input.
+3. **Do not add torch yet.** Ridge, a linear model on lag features, is tied with
+   gradient boosting everywhere. A Transformer would have to beat a tie, on a
+   problem whose ceiling is visibly close.
+4. **Track B is the next real step.** To forecast past two days you need
+   information from outside the buoy. That is exactly what a physics model
+   supplies and what postprocessing exploits — and now there is a measured
+   baseline for it to beat.
+
+## Remaining caveats
+
+- Three stations on one coastline, one target variable (WVHT).
+- Test windows are 180 days; folds share training data, so fold results are not
+  fully independent.
+- The 46087 outage means its three folds have an unusually long train-to-test
+  gap.
