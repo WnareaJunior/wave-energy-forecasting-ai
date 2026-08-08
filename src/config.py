@@ -7,6 +7,8 @@ Copernicus downloader). Every script now imports from here so they cannot drift
 apart again.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 # --------------------------------------------------------------------------

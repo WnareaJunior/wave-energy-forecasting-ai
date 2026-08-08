@@ -5,6 +5,8 @@ in WVHT is a 99-metre wave, and it will not raise an error - it will just
 quietly dominate every mean, threshold, and model fit downstream.
 """
 
+import gzip
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,6 +15,8 @@ from src.data.ndbc import (
     MISSING_SENTINELS,
     VALID_RANGES,
     coverage_report,
+    decode_payload,
+    fetch_station_year,
     parse_stdmet,
 )
 
@@ -98,6 +102,82 @@ class TestRangeFiltering:
         text = MODERN_FILE.replace(" 3.20", "-1.00")
         df = parse_stdmet(text)
         assert np.isnan(df["WVHT"].iloc[0])
+
+
+class TestDecodePayload:
+    def test_decodes_gzip(self):
+        assert decode_payload(gzip.compress(MODERN_FILE.encode())) == MODERN_FILE
+
+    def test_decodes_plain_text(self):
+        """The CGI viewer serves uncompressed text despite the .gz filename."""
+        assert decode_payload(MODERN_FILE.encode()) == MODERN_FILE
+
+    def test_survives_bad_bytes(self):
+        assert decode_payload(b"2020 01 01 00 00 \xff\xfe") is not None
+
+
+class _FakeResponse:
+    def __init__(self, status_code=200, content=b""):
+        self.status_code = status_code
+        self.content = content
+        self.ok = 200 <= status_code < 300
+
+
+class TestFetch:
+    def test_uses_the_cache_without_network(self, tmp_path, monkeypatch):
+        (tmp_path / "46041h2020.txt.gz").write_bytes(gzip.compress(MODERN_FILE.encode()))
+
+        def explode(*args, **kwargs):
+            raise AssertionError("cache miss: should not have hit the network")
+
+        monkeypatch.setattr("requests.get", explode)
+        df = fetch_station_year("46041", 2020, cache_dir=tmp_path)
+        assert len(df) == 4
+
+    def test_falls_back_to_the_viewer_on_404(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            if "historical/stdmet" in url and "view_text_file" not in url:
+                return _FakeResponse(404)
+            return _FakeResponse(200, MODERN_FILE.encode())
+
+        monkeypatch.setattr("requests.get", fake_get)
+        df = fetch_station_year("46041", 2020, cache_dir=tmp_path)
+        assert len(calls) == 2
+        assert len(df) == 4
+
+    def test_rejects_an_html_error_page(self, tmp_path, monkeypatch):
+        """The viewer returns HTTP 200 with an HTML page when a file is absent."""
+        monkeypatch.setattr(
+            "requests.get",
+            lambda url, **kw: _FakeResponse(200, b"<HTML><body>Not found</body></HTML>"),
+        )
+        assert fetch_station_year("46041", 1970, cache_dir=tmp_path).empty
+
+    def test_missing_year_returns_empty_not_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("requests.get", lambda url, **kw: _FakeResponse(404))
+        assert fetch_station_year("46041", 1970, cache_dir=tmp_path).empty
+
+    def test_network_error_on_one_url_tries_the_other(self, tmp_path, monkeypatch):
+        import requests
+
+        def fake_get(url, **kwargs):
+            if "view_text_file" not in url:
+                raise requests.ConnectionError("boom")
+            return _FakeResponse(200, gzip.compress(MODERN_FILE.encode()))
+
+        monkeypatch.setattr("requests.get", fake_get)
+        assert len(fetch_station_year("46041", 2020, cache_dir=tmp_path)) == 4
+
+    def test_successful_download_is_cached(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "requests.get",
+            lambda url, **kw: _FakeResponse(200, MODERN_FILE.encode()),
+        )
+        fetch_station_year("46041", 2020, cache_dir=tmp_path)
+        assert (tmp_path / "46041h2020.txt.gz").exists()
 
 
 class TestCoverageReport:

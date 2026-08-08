@@ -45,13 +45,25 @@ import io
 import logging
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+#: Primary location: the gzipped archive file.
 NDBC_HISTORICAL_URL = (
     "https://www.ndbc.noaa.gov/data/historical/stdmet/{station}h{year}.txt.gz"
 )
+
+#: Fallback: the CGI viewer, which serves the same content as plain text. Some
+#: station-years are reachable through one and not the other.
+NDBC_VIEWER_URL = (
+    "https://www.ndbc.noaa.gov/view_text_file.php"
+    "?filename={station}h{year}.txt.gz&dir=data/historical/stdmet/"
+)
+
+#: gzip magic number, used to tell a compressed archive from plain text.
+GZIP_MAGIC = b"\x1f\x8b"
 
 #: Full modern standard-meteorological column set, in file order. Used only as a
 #: fallback: the column names are read from the file's own header, because the
@@ -178,18 +190,30 @@ def parse_stdmet(text: str) -> pd.DataFrame:
     for column, sentinel in MISSING_SENTINELS.items():
         if column in df.columns:
             df[column] = pd.to_numeric(df[column], errors="coerce")
-            df.loc[df[column] >= sentinel, column] = pd.NA
+            df.loc[df[column] >= sentinel, column] = np.nan
 
     for column, (low, high) in VALID_RANGES.items():
         if column in df.columns:
             outside = (df[column] < low) | (df[column] > high)
-            df.loc[outside, column] = pd.NA
+            df.loc[outside, column] = np.nan
 
     return df.astype("float64")
 
 
 def _cache_path(cache_dir: Path, station: str, year: int) -> Path:
     return Path(cache_dir) / f"{station}h{year}.txt.gz"
+
+
+def decode_payload(raw: bytes) -> str:
+    """Decode a downloaded or cached file, gzipped or not.
+
+    The archive path serves gzip; the CGI viewer serves plain text. Sniffing the
+    magic number rather than trusting the file extension means both work through
+    the same cache.
+    """
+    if raw[:2] == GZIP_MAGIC:
+        return gzip.decompress(raw).decode("utf-8", errors="replace")
+    return raw.decode("utf-8", errors="replace")
 
 
 def fetch_station_year(
@@ -200,8 +224,9 @@ def fetch_station_year(
 ) -> pd.DataFrame:
     """Download (or read from cache) one station-year of buoy observations.
 
-    The raw ``.txt.gz`` is cached on disk, so re-running an experiment costs no
-    network traffic.
+    Tries the gzipped archive first and falls back to NDBC's text viewer, which
+    occasionally serves a station-year the archive path does not. The raw bytes
+    are cached, so re-running an experiment costs no network traffic.
 
     Args:
         station: NDBC station id, e.g. ``"46041"``.
@@ -210,8 +235,9 @@ def fetch_station_year(
         timeout: HTTP timeout in seconds.
 
     Returns:
-        Parsed observations, or an empty DataFrame if that station-year does not
-        exist (common for a buoy's first or last year, and for adrift periods).
+        Parsed observations, or an empty DataFrame if that station-year is not
+        available (common for a buoy's first or last year, and for periods when
+        it was adrift or ashore for maintenance).
     """
     import requests  # imported lazily so parsing works without network deps
 
@@ -220,17 +246,37 @@ def fetch_station_year(
     path = _cache_path(cache_dir, station, year)
 
     if not path.exists():
-        url = NDBC_HISTORICAL_URL.format(station=station, year=year)
-        logger.info("Downloading %s", url)
-        response = requests.get(url, timeout=timeout)
-        if response.status_code == 404:
-            logger.warning("No data for station %s in %s", station, year)
-            return pd.DataFrame()
-        response.raise_for_status()
-        path.write_bytes(response.content)
+        payload = None
+        for template in (NDBC_HISTORICAL_URL, NDBC_VIEWER_URL):
+            url = template.format(station=station, year=year)
+            logger.info("Downloading %s", url)
+            try:
+                response = requests.get(url, timeout=timeout)
+            except requests.RequestException as e:
+                logger.warning("  request failed: %s", e)
+                continue
 
-    with gzip.open(path, "rt", errors="replace") as f:
-        return parse_stdmet(f.read())
+            if response.status_code == 404:
+                logger.info("  404")
+                continue
+            if not response.ok:
+                logger.warning("  HTTP %s", response.status_code)
+                continue
+            # The viewer returns an HTML error page with status 200 when the
+            # file is missing, so check that the body looks like data.
+            if b"<html" in response.content[:200].lower():
+                logger.info("  got an HTML page, not data")
+                continue
+
+            payload = response.content
+            break
+
+        if payload is None:
+            logger.warning("No data available for station %s in %s", station, year)
+            return pd.DataFrame()
+        path.write_bytes(payload)
+
+    return parse_stdmet(decode_payload(path.read_bytes()))
 
 
 def load_station(
