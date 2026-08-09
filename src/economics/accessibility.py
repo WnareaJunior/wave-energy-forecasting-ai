@@ -126,22 +126,23 @@ def _epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
 
 #: Longest interruption that may be bridged when measuring a waiting time.
 #:
-#: Getting this wrong in either direction is catastrophic, and both mistakes
-#: were made here before the value existed.
+#: Bridge nothing and every momentary dropout censors the wait, discarding the
+#: long waits that the mean is mostly made of. Bridge everything and a
+#: year-long outage is priced as a year of bad weather, which is the bug this
+#: machinery exists to fix. NDBC coverage on these buoys runs 77-87%.
 #:
-#: Bridge nothing, and every dropout censors the wait. NDBC coverage on these
-#: buoys runs 77-87% with the misses scattered hour by hour, so the mean run of
-#: strictly uninterrupted observation is 4-7 hours. Almost every wait then runs
-#: past the end of its run and is discarded, leaving only the shortest - which
-#: reported 0.5% downtime for a site with 45% accessibility and 2.7 workable
-#: windows in an average winter.
+#: A day is the compromise: long enough to absorb a routine dropout, short
+#: enough that bridging adds at most 24 h of uncertainty to a wait measured in
+#: hundreds. On synthetic records whose window set is provably unchanged by the
+#: dropouts, 24 h, 72 h and no censoring at all agree to the hour, while only
+#: the last mis-prices a year-long outage - so the value sits on a plateau
+#: rather than a knife edge.
 #:
-#: Bridge everything, and a year-long outage is priced as a year of bad
-#: weather, which is where this started.
-#:
-#: A day is the compromise: long enough to absorb the routine dropouts that
-#: dominate these records, short enough that bridging adds at most 24 h of
-#: uncertainty to a wait measured in hundreds.
+#: An earlier version of this comment justified the tolerance with figures
+#: taken from the real records - a 4-7 h mean run of observation, 0.5%
+#: downtime. Those came from the 1000x units error in _epoch_ns and were
+#: measuring nothing. They are removed rather than restated: the argument
+#: above rests only on the synthetic sensitivity, which is unaffected.
 DEFAULT_MAX_GAP_HOURS = 24.0
 
 

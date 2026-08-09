@@ -606,12 +606,19 @@ class TestWaitsAcrossDataGaps:
     accessible of the three sites, needing the shortest window and offering
     the most windows per year.
 
-    Censoring on *every* missing hour then broke it the other way. NDBC
-    coverage runs 77-87% with the misses scattered hour by hour, so the mean
-    run of strictly uninterrupted observation is 4-7 h; nearly every wait was
-    discarded and the surviving short ones gave 0.5% downtime at sites with
-    2-3 workable windows in an average winter. Neither error failed a test;
-    both were caught by the output being absurd.
+    Censoring on *every* missing hour is the opposite error: it discards the
+    long waits that the mean is mostly made of.
+
+    A third bug sat underneath both and made the evidence for them unreadable.
+    _epoch_ns divided by nanoseconds per hour while reading an index stored in
+    microseconds, so every duration on the real records was 1000x too small -
+    including the gap durations these tests are about. The censoring machinery
+    was being measured through the arithmetic it was meant to correct. See
+    TestDatetimeResolutionIndependence.
+
+    None of the three failed a test. Each was caught by an output being
+    impossible: an outage priced as weather, a wait shorter than the job, a
+    nine-year record whose longest wait was 7.3 hours.
     """
 
     @staticmethod
