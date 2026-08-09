@@ -14,7 +14,12 @@ on:
       stations:
         description: "Comma-separated NDBC stations"
         required: true
-        default: "46041"
+        default: "46041,46087,46029"
+        type: string
+      members:
+        description: "Ensemble members; each multiplies transfer volume"
+        required: false
+        default: "c00,p01,p02,p03,p04"
         type: string
       years:
         description: "Year range; the reforecast ends in 2019"
@@ -24,7 +29,7 @@ on:
       stride:
         description: "Take every Nth daily cycle (1 = all, ~16 GB)"
         required: true
-        default: "1"
+        default: "2"
         type: string
       horizons:
         description: "Comma-separated lead times in hours"
@@ -44,10 +49,11 @@ permissions:
   contents: read
 
 env:
-  STATIONS: ${{ inputs.stations || '46041' }}
+  STATIONS: ${{ inputs.stations || '46041,46087,46029' }}
   YEARS: ${{ inputs.years || '2015-2019' }}
-  STRIDE: ${{ inputs.stride || '1' }}
+  STRIDE: ${{ inputs.stride || '2' }}
   HORIZONS: ${{ inputs.horizons || '6,12,24,48,72' }}
+  MEMBERS: ${{ inputs.members || 'c00,p01,p02,p03,p04' }}
   # HDF5's file locking assumes a POSIX-locking filesystem and misbehaves on
   # some runner mounts. Reads here are single-threaded and single-process, so
   # the lock buys nothing.
@@ -107,11 +113,12 @@ jobs:
       - name: Run Track B
         run: |
           set -o pipefail
-          echo "Stations: $STATIONS  Years: $YEARS  Stride: $STRIDE  Horizons: $HORIZONS"
+          echo "Stations: $STATIONS  Years: $YEARS  Stride: $STRIDE  Members: $MEMBERS  Horizons: $HORIZONS"
           python experiments/track_b_postprocess.py \
             --stations "$STATIONS" \
             --years "$YEARS" \
             --stride "$STRIDE" \
+            --members "$MEMBERS" \
             --horizons "$HORIZONS" 2>&1 | tee track_b.log
 
       - name: Publish to the run summary

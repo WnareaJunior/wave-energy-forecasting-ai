@@ -44,7 +44,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.config import NDBC_STATIONS, NOAA_LAST_YEAR  # noqa: E402
 from src.data.gefs import (  # noqa: E402
+    aggregate_ensemble,
     align_forecast_to_issue_time,
+    build_ensemble_dataset,
     build_forecast_dataset,
     daily_dates,
 )
@@ -89,6 +91,7 @@ REQUIRED_COLUMNS = ["WVHT", "nwp_wvht"]
 #: state, the observed state at issue time, and the season.
 POSTPROC_FEATURES = [
     "nwp_wvht",   # the forecast being corrected
+    "nwp_spread", # ensemble disagreement: the forecast's own uncertainty
     "nwp_tr",     # its mean period: swell and wind sea fail differently
     "nwp_fp",     # its peak frequency
     "WVHT",       # observed height at issue time
@@ -148,7 +151,8 @@ def report_raw_forecast_error(observations, forecasts, station, horizons) -> Non
         forecast = forecasts[forecasts["lead_hours"] == horizon].set_index("valid_time")
         if forecast.empty:
             continue
-        joined = pd.DataFrame({"nwp": forecast["hs"]}).join(
+        column = "hs_mean" if "hs_mean" in forecast.columns else "hs"
+        joined = pd.DataFrame({"nwp": forecast[column]}).join(
             truth.rename("obs"), how="inner"
         ).dropna()
         if joined.empty:
@@ -182,9 +186,27 @@ def run_station(station: str, args) -> pd.DataFrame:
         "Extracting %d GEFS cycles (member %s, stride %d)",
         len(dates), args.member, args.stride,
     )
-    forecasts = build_forecast_dataset(
-        dates, [station], member=args.member, workers=args.workers
-    )
+    members = [m.strip() for m in args.members.split(",") if m.strip()]
+    if len(members) == 1:
+        forecasts = build_forecast_dataset(
+            dates, [station], member=members[0], workers=args.workers
+        )
+        forecasts["hs_mean"] = forecasts["hs"]
+        forecasts["hs_std"] = 0.0
+    else:
+        raw = build_ensemble_dataset(
+            dates, [station], members=members, workers=args.workers
+        )
+        # Keep the control's period fields; only height is ensembled here.
+        control = raw[raw["member"] == members[0]].drop(columns=["member"])
+        aggregated = aggregate_ensemble(raw, "hs")
+        forecasts = control.merge(
+            aggregated, on=["station", "valid_time", "lead_hours"], how="left"
+        )
+        logger.info(
+            "Ensembled %d members; median members per point: %.0f",
+            len(members), forecasts["n_members"].median(),
+        )
     if forecasts.empty:
         raise RuntimeError(f"No GEFS cycles could be read for {station}")
 
@@ -202,7 +224,12 @@ def run_station(station: str, args) -> pd.DataFrame:
         # a 4 m swell and a 4 m wind sea are different forecasts and fail
         # differently.
         horizon_features = features.copy()
-        for source, name in (("hs", "nwp_wvht"), ("tr", "nwp_tr"), ("fp", "nwp_fp")):
+        for source, name in (
+            ("hs_mean", "nwp_wvht"),
+            ("hs_std", "nwp_spread"),
+            ("tr", "nwp_tr"),
+            ("fp", "nwp_fp"),
+        ):
             if source not in at_lead.columns:
                 continue
             horizon_features[name] = align_forecast_to_issue_time(
@@ -298,7 +325,12 @@ def main(argv=None) -> int:
         help="Take every Nth cycle. Each cycle is an 8.7 MB download; stride 1 "
         "over 2015-2019 is ~1,800 files and ~16 GB.",
     )
-    parser.add_argument("--member", default="c00", help="c00 is the control run")
+    parser.add_argument(
+        "--members",
+        default="c00,p01,p02,p03,p04",
+        help="Ensemble members. Each is a separate download, so this multiplies "
+        "transfer volume. A single member skips ensembling entirely.",
+    )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--n-splits", type=int, default=3)
     parser.add_argument("--test-size-days", type=int, default=240)

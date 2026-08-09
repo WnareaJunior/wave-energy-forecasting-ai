@@ -356,6 +356,66 @@ def build_forecast_dataset(
     return pd.concat(frames, ignore_index=True)
 
 
+def build_ensemble_dataset(
+    dates,
+    station_ids,
+    members=("c00", "p01", "p02", "p03", "p04"),
+    **kwargs,
+) -> pd.DataFrame:
+    """Extract several ensemble members and tag each with its member id.
+
+    Members are separate files, so this multiplies transfer volume by the
+    member count. A member missing for a given cycle is skipped rather than
+    failing the run: the archive expands to eleven members on Wednesdays and
+    the set is not uniform across the record.
+
+    Returns:
+        Long DataFrame with an added ``member`` column.
+    """
+    frames = []
+    for member in members:
+        logger.info("Member %s", member)
+        try:
+            frame = build_forecast_dataset(dates, station_ids, member=member, **kwargs)
+        except RuntimeError as e:
+            logger.warning("Member %s unavailable: %s", member, e)
+            continue
+        frame["member"] = member
+        frames.append(frame)
+
+    if not frames:
+        raise RuntimeError(f"No members could be read out of {list(members)}")
+    return pd.concat(frames, ignore_index=True)
+
+
+def aggregate_ensemble(long_df: pd.DataFrame, variable: str = "hs") -> pd.DataFrame:
+    """Collapse ensemble members into mean and spread.
+
+    The ensemble mean is normally more accurate than any single member,
+    including the control, because averaging cancels independent error. Spread
+    is the ensemble's own uncertainty estimate: wide spread means the members
+    disagree, which is a genuine signal that the forecast is less trustworthy -
+    and unlike anything derivable from a single run, it is a predictor a
+    postprocessor can actually use.
+
+    Returns:
+        DataFrame indexed like the input minus member, with ``{variable}_mean``,
+        ``{variable}_std``, ``{variable}_min``, ``{variable}_max`` and
+        ``n_members``.
+    """
+    grouped = long_df.groupby(["station", "valid_time", "lead_hours"])[variable]
+    out = pd.DataFrame(
+        {
+            f"{variable}_mean": grouped.mean(),
+            f"{variable}_std": grouped.std(),
+            f"{variable}_min": grouped.min(),
+            f"{variable}_max": grouped.max(),
+            "n_members": grouped.count(),
+        }
+    ).reset_index()
+    return out
+
+
 def daily_dates(start: str, end: str, stride: int = 1) -> list[str]:
     """yyyymmdd strings between two ISO dates.
 
