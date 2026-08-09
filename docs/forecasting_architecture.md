@@ -313,6 +313,35 @@ the heavy infrastructure is committed to. See
   to `ndbc.noaa.gov` or the NOAA S3 bucket. Verified end to end on synthetic
   data only; synthetic numbers are not results.
 
+**Phase 1b — Track B, NWP postprocessing — BUILT, first run in flight**
+
+The pilot showed buoy history is exhausted past ~48 h. Beating that needs
+information from outside the buoy, which is what a physics forecast supplies.
+
+- ✅ Archive layout established from the bucket's own documentation rather than
+  guessed: `GEFSv12/reforecast/{year}/{yyyymmdd}/{gridded,station}/`, one 03Z
+  cycle per day, five members, 2000–2019.
+- ✅ **Point output found**: `*.tab.nc`, 8.7 MB, holding hourly series at 658
+  buoy positions — 200× smaller than the gridded GRIB2 and needing no
+  interpolation.
+- ✅ **All three pilot buoys matched by NDBC id** (46041 idx 107, 46087 idx 108,
+  46029 idx 106), positions agreeing to 1–3 km. The forecast/observation join
+  is exact.
+- ✅ `src/data/gefs.py` extraction, with a half-degree cap on position fallback
+  and download-reduce-delete so peak disk stays flat.
+- ✅ `align_forecast_to_issue_time()` isolated and tested — the one operation
+  that can leak the future into a postprocessing set.
+- ✅ `required_columns` threaded through the backtest, so the raw-NWP reference
+  is scored on the same rows as the models it is compared against.
+- ✅ `experiments/track_b_postprocess.py`, scoring against raw GEFS with a
+  bias-corrected NWP baseline alongside.
+- 🔄 First run at stride 3.
+
+**Known constraint:** the reforecast ends in 2019 and the NDBC records start in
+2015, so the paired window is 2015–2019. Cycles are daily, so a fixed lead time
+yields ~1,800 samples at stride 1 and ~600 at stride 3. Enough for bias
+correction; thin for anything more ambitious.
+
 **Phase 1 — Data foundation (~1 week)**
 5. Refactor the two downloader scripts into `src/data/sources/` functions with config
    objects; fix the NOAA paginator.
