@@ -74,6 +74,43 @@ DEFAULT_HORIZONS = (6, 12, 24, 48, 72)
 #: different sample than the models it is compared against.
 REQUIRED_COLUMNS = ["WVHT", "nwp_wvht"]
 
+#: A deliberately small feature set.
+#:
+#: The first run handed the postprocessors the full 113-column buoy feature
+#: frame against ~300 training rows per fold, and both ridge and LightGBM came
+#: out *worse* than the uncorrected forecast at every horizon. That is what
+#: overfitting looks like, and it says nothing about whether postprocessing
+#: works.
+#:
+#: Cycles are daily, so samples are scarce by construction: one per cycle per
+#: lead. The feature set has to be sized for hundreds of rows, not tens of
+#: thousands. These are the quantities with a defensible reason to carry
+#: information about the forecast's error - the forecast itself and its sea
+#: state, the observed state at issue time, and the season.
+POSTPROC_FEATURES = [
+    "nwp_wvht",   # the forecast being corrected
+    "nwp_tr",     # its mean period: swell and wind sea fail differently
+    "nwp_fp",     # its peak frequency
+    "WVHT",       # observed height at issue time
+    "APD",        # observed period at issue time
+    "WVHT_lag6",  # recent trend: is the sea building or dying
+    "WVHT_lag24",
+    "WVHT_mean24",
+    "doy_sin",    # seasonal bias structure
+    "doy_cos",
+]
+
+#: LightGBM defaults assume far more data than a daily-cycle archive provides.
+#: Shallow trees, a high minimum leaf size and heavy regularisation, or it
+#: memorises individual storms out of a few hundred rows.
+SMALL_DATA_LGBM = {
+    "num_leaves": 7,
+    "min_data_in_leaf": 30,
+    "learning_rate": 0.03,
+    "feature_fraction": 0.7,
+    "lambda_l2": 5.0,
+}
+
 
 def build_factories(seed: int = 0) -> dict:
     factories = {
@@ -81,12 +118,14 @@ def build_factories(seed: int = 0) -> dict:
         "climatology": ClimatologyForecaster,
         "raw_nwp": RawNWPForecaster,
         "nwp_debiased": BiasCorrectedNWPForecaster,
-        "ridge_postproc": lambda: RidgeForecaster(alpha=1.0),
+        "ridge_postproc": lambda: RidgeForecaster(alpha=10.0),
     }
     try:
         from src.models.trees import LightGBMForecaster
 
-        factories["lgbm_postproc"] = lambda: LightGBMForecaster(seed=seed)
+        factories["lgbm_postproc"] = lambda: LightGBMForecaster(
+            params=SMALL_DATA_LGBM, num_boost_round=300, seed=seed
+        )
     except ImportError:
         logger.warning("lightgbm not installed - skipping that rung")
     return factories
@@ -157,17 +196,30 @@ def run_station(station: str, args) -> pd.DataFrame:
 
     records = []
     for horizon in horizons:
-        at_valid = (
-            forecasts[forecasts["lead_hours"] == horizon]
-            .set_index("valid_time")["hs"]
-            .sort_index()
-        )
-        horizon_features = features.assign(
-            nwp_wvht=align_forecast_to_issue_time(at_valid, horizon, features.index)
-        )
+        at_lead = forecasts[forecasts["lead_hours"] == horizon].set_index("valid_time")
+
+        # Carry the forecast's own sea-state description, not just its height:
+        # a 4 m swell and a 4 m wind sea are different forecasts and fail
+        # differently.
+        horizon_features = features.copy()
+        for source, name in (("hs", "nwp_wvht"), ("tr", "nwp_tr"), ("fp", "nwp_fp")):
+            if source not in at_lead.columns:
+                continue
+            horizon_features[name] = align_forecast_to_issue_time(
+                at_lead[source].sort_index(), horizon, features.index
+            )
+
+        available = [c for c in POSTPROC_FEATURES if c in horizon_features.columns]
+        missing = [c for c in POSTPROC_FEATURES if c not in horizon_features.columns]
+        if missing:
+            logger.warning("Missing postprocessing features: %s", missing)
+        horizon_features = horizon_features[available]
 
         usable = horizon_features["nwp_wvht"].notna().sum()
-        logger.info("Horizon %sh: %d rows carry a forecast", horizon, usable)
+        logger.info(
+            "Horizon %sh: %d rows carry a forecast, %d features",
+            horizon, usable, len(available),
+        )
         if usable < args.min_samples:
             logger.warning(
                 "Horizon %sh: only %d paired rows, below --min-samples %d, skipping",
@@ -242,7 +294,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--stride",
         type=int,
-        default=3,
+        default=1,
         help="Take every Nth cycle. Each cycle is an 8.7 MB download; stride 1 "
         "over 2015-2019 is ~1,800 files and ~16 GB.",
     )

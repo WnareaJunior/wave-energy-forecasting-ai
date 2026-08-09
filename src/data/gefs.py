@@ -62,13 +62,24 @@ MAX_MATCH_DEGREES = 0.5
 FORECAST_VARS = ("hs", "tr", "fp", "lm", "th1p")
 
 
-def make_client():
-    """Anonymous S3 client. The reforecast bucket is public."""
+def make_client(max_pool_connections: int = 32):
+    """Anonymous S3 client. The reforecast bucket is public.
+
+    The connection pool is sized above the download concurrency; botocore's
+    default of 10 produced hundreds of "Connection pool is full, discarding
+    connection" warnings on a 609-cycle run. Harmless, but it means connections
+    are being torn down and re-established for no reason.
+    """
     import boto3
     from botocore import UNSIGNED
     from botocore.config import Config
 
-    return boto3.client("s3", config=Config(signature_version=UNSIGNED))
+    return boto3.client(
+        "s3",
+        config=Config(
+            signature_version=UNSIGNED, max_pool_connections=max_pool_connections
+        ),
+    )
 
 
 def cycle_init(date: str) -> pd.Timestamp:

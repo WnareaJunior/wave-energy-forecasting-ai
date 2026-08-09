@@ -24,7 +24,7 @@ on:
       stride:
         description: "Take every Nth daily cycle (1 = all, ~16 GB)"
         required: true
-        default: "3"
+        default: "1"
         type: string
       horizons:
         description: "Comma-separated lead times in hours"
@@ -46,7 +46,7 @@ permissions:
 env:
   STATIONS: ${{ inputs.stations || '46041' }}
   YEARS: ${{ inputs.years || '2015-2019' }}
-  STRIDE: ${{ inputs.stride || '3' }}
+  STRIDE: ${{ inputs.stride || '1' }}
   HORIZONS: ${{ inputs.horizons || '6,12,24,48,72' }}
   # HDF5's file locking assumes a POSIX-locking filesystem and misbehaves on
   # some runner mounts. Reads here are single-threaded and single-process, so
