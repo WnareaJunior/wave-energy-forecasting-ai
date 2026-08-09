@@ -57,10 +57,16 @@ def _wait_hours(stats: dict) -> tuple:
         ``(wait_hours, unservicable)``. ``wait_hours`` is NaN when
         unservicable; callers decide what that costs.
     """
-    wait = stats["expected_wait_hours"]
-    if pd.isna(wait):
+    # Keyed on the window count rather than on the wait being NaN. The two are
+    # equivalent - every window contains at least its own start timestep, and
+    # timesteps inside a window are assigned a zero wait, so a non-empty window
+    # set always yields a finite mean - but the count says what is actually
+    # meant. Censoring waits at the end of each run of observation looked like
+    # it might make NaN reachable with windows present; it cannot, and a
+    # fallback for that case would have been unreachable code.
+    if not stats["n_windows"]:
         return float("nan"), True
-    return float(wait), False
+    return float(stats["expected_wait_hours"]), False
 
 
 @dataclass(frozen=True)

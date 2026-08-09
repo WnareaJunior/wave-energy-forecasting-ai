@@ -594,3 +594,158 @@ class TestUnservicableSites:
         assert result["downtime_fraction"] == 1.0
         assert result["delivered_annual_usd"] == pytest.approx(0.0)
         assert np.isfinite(result["net_annual_usd"])
+
+
+class TestWaitsAcrossDataGaps:
+    """An outage is not waiting time.
+
+    Buoy 46087 is missing all of 2021 and has 77% coverage overall. Walking
+    the record without regard for that made every timestep late in 2020 "wait"
+    into 2022, and the site reported a 1,900 h mean wait while simultaneously
+    being the most accessible of the three, needing the shortest window, and
+    offering the most windows per year. Three facts contradicting the fourth
+    is what exposed it - no test was failing.
+
+    The shape matters: ``load_station`` resamples onto a regular hourly grid,
+    so an outage is a block of NaN rows and the index stays continuous.
+    A fix that split on index gaps alone would find nothing to split, which is
+    the first fix that was attempted here.
+    """
+
+    @staticmethod
+    def _seasonal_hs():
+        """Windows almost only in summer, as on this coast."""
+        rng = np.random.default_rng(0)
+        index = pd.date_range("2015-01-01", "2023-12-31 23:00", freq="1h")
+        return pd.Series(
+            np.clip(
+                2.3
+                - 1.3 * np.cos(2 * np.pi * (index.dayofyear - 200) / 365.25)
+                + rng.gamma(2, 0.28, len(index))
+                - 0.55,
+                0.15,
+                None,
+            ),
+            index=index,
+        )
+
+    def test_blanking_a_year_does_not_inflate_the_wait(self):
+        """The regression, in the exact form the real record takes."""
+        intact = self._seasonal_hs()
+        blanked = intact.copy()
+        blanked[
+            (blanked.index >= "2021-01-01") & (blanked.index < "2022-01-01")
+        ] = np.nan
+
+        intact_wait = expected_waiting_hours(intact, 1.75, 28.5)
+        blanked_wait = expected_waiting_hours(blanked, 1.75, 28.5)
+
+        # Deleting observations must not make the site look worse. Pre-fix this
+        # rose from 2,724 h to 3,718 h.
+        assert blanked_wait <= intact_wait * 1.05
+
+    def test_nan_rows_break_a_run_even_on_a_regular_index(self):
+        """Guards the specific failure of the first attempted fix."""
+        index = pd.date_range("2016-01-01", periods=24 * 400, freq="1h")
+        hs = pd.Series(np.full(len(index), 3.0), index=index)
+        hs.iloc[:48] = 0.5      # one early window
+        hs.iloc[-48:] = 0.5     # one much later window
+        hs.iloc[100:5000] = np.nan
+
+        stats = window_statistics(hs, 1.75, 24.0)
+        # The index never skips, so only NaN-awareness can censor these.
+        assert stats["censored_fraction"] > 0.0
+        assert stats["expected_wait_hours"] < 24 * 400
+
+    def test_index_gaps_break_a_run_too(self):
+        intact = self._seasonal_hs()
+        removed = intact[
+            ~((intact.index >= "2021-01-01") & (intact.index < "2022-01-01"))
+        ]
+        assert expected_waiting_hours(removed, 1.75, 28.5) <= expected_waiting_hours(
+            intact, 1.75, 28.5
+        ) * 1.05
+
+    def test_censored_fraction_is_reported_and_finite(self):
+        stats = window_statistics(self._seasonal_hs(), 1.75, 28.5)
+        assert 0.0 <= stats["censored_fraction"] < 1.0
+        assert np.isfinite(stats["expected_wait_hours"])
+
+    def test_censoring_rises_when_windows_are_scarce(self):
+        hs = self._seasonal_hs()
+        easy = window_statistics(hs, 1.75, 12.0)["censored_fraction"]
+        hard = window_statistics(hs, 1.75, 240.0)["censored_fraction"]
+        assert hard > easy
+
+    def test_missing_data_does_not_count_toward_censoring(self):
+        """Censoring is about rough seas, not offline sensors."""
+        intact = self._seasonal_hs()
+        blanked = intact.copy()
+        blanked[
+            (blanked.index >= "2021-01-01") & (blanked.index < "2022-01-01")
+        ] = np.nan
+
+        # Roughly a ninth of the record is blank; if unobserved rows counted as
+        # censored the fraction would jump by about that much.
+        assert window_statistics(blanked, 1.75, 28.5)["censored_fraction"] < (
+            window_statistics(intact, 1.75, 28.5)["censored_fraction"] + 0.10
+        )
+
+
+class TestCensoredButServicable:
+    """A fragmented record must not be mistaken for an unservicable site.
+
+    Censoring waits at the end of each run of observation raised the question
+    of whether the expected wait could come back NaN while windows exist -
+    which, read as "no window exists", would charge a site full downtime for
+    its own sensor outages and punish exactly the buoys whose records are
+    patchiest. It cannot happen, and the test below is what establishes that,
+    so no fallback is needed for the case.
+    """
+
+    def test_windows_present_always_yield_a_finite_wait(self):
+        """The invariant that makes an 'all censored' fallback unnecessary.
+
+        Every window contains at least its own start timestep, and timesteps
+        inside a window are assigned a zero wait.
+        """
+        rng = np.random.default_rng(4)
+        for fragment_days, threshold, required in (
+            (4, 1.75, 12.0),
+            (7, 1.75, 24.0),
+            (3, 1.5, 8.0),
+        ):
+            index = pd.date_range("2016-01-01", periods=24 * 700, freq="1h", tz="UTC")
+            hs = pd.Series(
+                np.clip(1.9 + rng.normal(0, 0.6, len(index)), 0.1, None), index=index
+            )
+            day = (index - index[0]).days
+            hs[day % fragment_days != 0] = np.nan
+
+            stats = window_statistics(hs, threshold, required)
+            if stats["n_windows"]:
+                assert np.isfinite(stats["expected_wait_hours"]), (
+                    f"{stats['n_windows']} windows but a NaN wait "
+                    f"({fragment_days=}, {threshold=}, {required=})"
+                )
+
+    def test_truly_windowless_record_is_unservicable(self):
+        index = pd.date_range("2016-01-01", periods=24 * 400, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(len(index), 6.0), index=index)
+        assert window_statistics(hs, 1.75, 12.0)["n_windows"] == 0
+        assert downtime_fraction(hs, SiteLogistics(distance_km=40)) == 1.0
+
+    def test_short_runs_that_cannot_fit_the_job_are_unservicable(self):
+        """A record chopped into 24 h pieces cannot support a 32 h job.
+
+        Correct, and worth pinning: it is the honest reading of the record
+        rather than an artifact. find_windows refuses to assert that an
+        unobserved stretch was calm.
+        """
+        index = pd.date_range("2016-01-01", periods=24 * 700, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(len(index), 0.5), index=index)
+        day = (index - index[0]).days
+        hs[day % 4 != 0] = np.nan
+
+        assert window_statistics(hs, 1.75, 32.0)["n_windows"] == 0
+        assert window_statistics(hs, 1.75, 12.0)["n_windows"] > 0

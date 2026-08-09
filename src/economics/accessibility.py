@@ -108,6 +108,108 @@ def _median_step_hours(index: pd.DatetimeIndex) -> float:
     return float(np.median(steps))
 
 
+def _epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
+    """Index as int64 nanoseconds since the epoch, timezone or not."""
+    return pd.DatetimeIndex(index).asi8
+
+
+def _observed_segments(hs: pd.Series, step_hours: float) -> np.ndarray:
+    """For each timestep, the end time of its run of continuous observation.
+
+    A "run" breaks on a gap in the index *or* on a missing value, because both
+    mean the same thing: the record stops telling us what the sea was doing. A
+    waiting time may only be measured inside one run - measuring across a
+    break asserts something about hours that were never observed.
+
+    The missing-value half matters more than the index half here.
+    :func:`~src.data.ndbc.load_station` resamples onto a regular hourly grid,
+    so an outage appears as a block of NaN rows and the index stays perfectly
+    continuous. Splitting on index gaps alone would find nothing to split.
+
+    Returns:
+        Array of segment end times as epoch nanoseconds, ``-1`` wherever the
+        observation is missing. Integers rather than datetimes because the
+        index may be timezone-aware, in which case ``to_numpy()`` hands back
+        an object array of Timestamps that will not compare against
+        ``datetime64``.
+    """
+    index = hs.index
+    n = len(index)
+    if n == 0:
+        return np.array([], dtype="int64")
+
+    times = _epoch_ns(index)
+    observed = hs.notna().to_numpy()
+
+    continues = np.ones(n, dtype=bool)
+    if n > 1:
+        gaps = np.diff(times) / 3.6e12  # nanoseconds to hours
+        continues[1:] = gaps <= step_hours * 1.5
+
+    previously_observed = np.concatenate([[False], observed[:-1]])
+    begins = observed & (~previously_observed | ~continues)
+
+    segment_of = np.cumsum(begins) - 1
+    ends = np.full(n, -1, dtype="int64")
+    if not begins.any():
+        return ends
+
+    positions = np.flatnonzero(observed)
+    # Later writes win, so each segment id keeps its final position.
+    last_position = np.zeros(int(segment_of[positions].max()) + 1, dtype=int)
+    last_position[segment_of[positions]] = positions
+    ends[positions] = times[last_position[segment_of[positions]]]
+    return ends
+
+
+def _waiting_hours_array(
+    hs: pd.Series,
+    threshold_m: float,
+    required_hours: float,
+) -> tuple:
+    """Per-timestep waiting time, NaN where the wait cannot be observed.
+
+    Returns:
+        ``(waits, windows)``. ``waits`` is NaN at any timestep whose next
+        window lies beyond the end of its contiguous stretch of record - the
+        wait is right-censored there and cannot be measured.
+    """
+    windows = find_windows(hs, threshold_m, required_hours)
+    index = hs.index
+    waits = np.full(len(index), np.nan)
+    if windows.empty or len(index) == 0:
+        return waits, windows
+
+    starts = _epoch_ns(pd.DatetimeIndex(windows["start"]))
+    times = _epoch_ns(index)
+
+    # Waits are measured only inside a run of continuous observation.
+    #
+    # Walking the whole record instead counts an outage as waiting: buoy 46087
+    # is missing all of 2021, so every timestep late in 2020 "waited" into
+    # 2022. The site reported a 1,900 h mean wait while being the most
+    # accessible of the three, needing the shortest window, and offering the
+    # most windows per year. Those three facts contradicting the fourth is what
+    # exposed it.
+    segment_ends = _observed_segments(hs, _median_step_hours(index))
+
+    positions = np.searchsorted(starts, times, side="left")
+    found = positions < len(starts)
+    candidate = starts[np.minimum(positions, len(starts) - 1)]
+    # A window beyond the end of this run tells us nothing: observation stops
+    # before we learn how long the wait actually was.
+    measurable = found & (segment_ends >= 0) & (candidate <= segment_ends)
+
+    waits[measurable] = (candidate[measurable] - times[measurable]) / 3.6e12
+
+    # Timesteps already inside a window wait zero.
+    for _, window in windows.iterrows():
+        inside = np.asarray((index >= window["start"]) & (index <= window["end"]))
+        waits[inside] = 0.0
+
+    return waits, windows
+
+
 def expected_waiting_hours(
     hs: pd.Series,
     threshold_m: float,
@@ -125,30 +227,18 @@ def expected_waiting_hours(
     timesteps, so it reflects a randomly-timed need for a vessel rather than
     one scheduled for a calm month.
 
+    Waits that run past the end of a contiguous stretch of record are censored
+    and excluded rather than measured across the gap. That biases the mean
+    slightly *low*, because the excluded waits are the long ones - see
+    :func:`window_statistics`, which reports the censored fraction so the size
+    of the bias is visible. The alternative biases it catastrophically high.
+
     Returns:
         Mean waiting hours, or NaN if no adequate window exists in the record.
     """
-    windows = find_windows(hs, threshold_m, required_hours)
-    if windows.empty:
+    waits, windows = _waiting_hours_array(hs, threshold_m, required_hours)
+    if windows.empty or np.all(np.isnan(waits)):
         return float("nan")
-
-    index = hs.index
-    starts = windows["start"].to_numpy()
-    times = index.to_numpy()
-
-    # For each timestep, the next window start at or after it.
-    positions = np.searchsorted(starts, times, side="left")
-    waits = np.full(len(times), np.nan)
-    found = positions < len(starts)
-    waits[found] = (
-        starts[positions[found]] - times[found]
-    ).astype("timedelta64[s]").astype(float) / 3600.0
-
-    # Timesteps already inside a window wait zero.
-    for _, window in windows.iterrows():
-        inside = np.asarray((index >= window["start"]) & (index <= window["end"]))
-        waits[inside] = 0.0
-
     return float(np.nanmean(waits))
 
 
@@ -163,9 +253,18 @@ def window_statistics(
         dict with the accessible fraction, window counts and durations, the
         expected wait, and the implied annual standby hours.
     """
-    windows = find_windows(hs, threshold_m, required_hours)
+    waits, windows = _waiting_hours_array(hs, threshold_m, required_hours)
     record_hours = _record_hours(hs)
     years = record_hours / HOURS_PER_YEAR if record_hours else float("nan")
+    # Censoring is measured among *observed* timesteps. Counting the missing
+    # ones would conflate "the sea was too rough for a long time" with "the
+    # sensor was offline", which is the confusion this whole change is about.
+    observed = hs.notna().to_numpy()
+    censored = (
+        float(np.mean(np.isnan(waits[observed])))
+        if observed.any()
+        else float("nan")
+    )
 
     return {
         "threshold_m": threshold_m,
@@ -179,7 +278,14 @@ def window_statistics(
         "longest_window_hours": (
             float(windows["duration_hours"].max()) if not windows.empty else 0.0
         ),
-        "expected_wait_hours": expected_waiting_hours(hs, threshold_m, required_hours),
+        "expected_wait_hours": (
+            float(np.nanmean(waits))
+            if len(waits) and not np.all(np.isnan(waits))
+            else float("nan")
+        ),
+        # Share of timesteps whose wait ran past the end of their contiguous
+        # stretch of record. High values mean the mean wait is optimistic.
+        "censored_fraction": censored,
         "record_years": years,
     }
 
@@ -217,12 +323,20 @@ def seasonal_accessibility(
             continue
         stats = window_statistics(subset, threshold_m, required_hours)
 
-        # expected_wait_hours is dropped, not reported. Subsetting by month
-        # concatenates the same season across years, so the wait calculation
-        # runs from (say) February straight into the following December and
-        # counts the intervening nine months as waiting. The printed values
-        # exceeded the length of the season itself - 5,307 hours for a 90-day
-        # winter - which is how the flaw was noticed.
+        # expected_wait_hours is dropped, not reported.
+        #
+        # It used to be dropped because it was wrong: subsetting by month
+        # concatenates the same season across years, so the wait ran from
+        # February into the following December and counted the intervening
+        # nine months as waiting - 5,307 hours for a 90-day winter. That flaw
+        # is now fixed generally, since waits are measured only inside a run
+        # of continuous observation and a season boundary breaks the run.
+        #
+        # It stays dropped for a second reason the fix makes visible rather
+        # than removes: within a 90-day block almost every wait runs past the
+        # end of the block and is censored. On a winter subset the censored
+        # fraction reaches 1.00 and the mean is undefined. The quantity is not
+        # estimable from a season at a time, whatever the arithmetic.
         #
         # accessible_fraction and the window counts are unaffected: those are
         # per-timestep and per-run quantities, and find_windows already breaks
