@@ -597,26 +597,28 @@ class TestUnservicableSites:
 
 
 class TestWaitsAcrossDataGaps:
-    """An outage is not waiting time.
+    """Neither an outage nor a dropout is waiting time - but they differ.
 
-    Buoy 46087 is missing all of 2021 and has 77% coverage overall. Walking
-    the record without regard for that made every timestep late in 2020 "wait"
-    into 2022, and the site reported a 1,900 h mean wait while simultaneously
-    being the most accessible of the three, needing the shortest window, and
-    offering the most windows per year. Three facts contradicting the fourth
-    is what exposed it - no test was failing.
+    Two opposite errors were made here, and the tests below pin both.
 
-    The shape matters: ``load_station`` resamples onto a regular hourly grid,
-    so an outage is a block of NaN rows and the index stays continuous.
-    A fix that split on index gaps alone would find nothing to split, which is
-    the first fix that was attempted here.
+    Counting every unobserved hour as waiting priced buoy 46087's missing 2021
+    as a year of bad weather: it reported a 1,900 h wait while being the most
+    accessible of the three sites, needing the shortest window and offering
+    the most windows per year.
+
+    Censoring on *every* missing hour then broke it the other way. NDBC
+    coverage runs 77-87% with the misses scattered hour by hour, so the mean
+    run of strictly uninterrupted observation is 4-7 h; nearly every wait was
+    discarded and the surviving short ones gave 0.5% downtime at sites with
+    2-3 workable windows in an average winter. Neither error failed a test;
+    both were caught by the output being absurd.
     """
 
     @staticmethod
     def _seasonal_hs():
         """Windows almost only in summer, as on this coast."""
         rng = np.random.default_rng(0)
-        index = pd.date_range("2015-01-01", "2023-12-31 23:00", freq="1h")
+        index = pd.date_range("2015-01-01", "2023-12-31 23:00", freq="1h", tz="UTC")
         return pd.Series(
             np.clip(
                 2.3
@@ -629,67 +631,92 @@ class TestWaitsAcrossDataGaps:
             index=index,
         )
 
-    def test_blanking_a_year_does_not_inflate_the_wait(self):
-        """The regression, in the exact form the real record takes."""
+    @classmethod
+    def _dropouts_in_rough_weather(cls):
+        """Dropouts placed only where the sea was already unworkable.
+
+        This isolates the wait calculation from the window calculation: an
+        unworkable hour and a missing hour are equally unusable to
+        find_windows, so the window set is provably identical to the intact
+        record and any change in the wait comes from the wait code alone.
+        """
+        rng = np.random.default_rng(1)
+        base = cls._seasonal_hs()
+        masked = base.copy()
+        masked[(base > 2.5) & (rng.random(len(base)) < 0.30)] = np.nan
+        return base, masked
+
+    def test_scattered_dropouts_leave_the_window_set_untouched(self):
+        """Precondition for the test below; asserted so it cannot rot."""
+        base, masked = self._dropouts_in_rough_weather()
+        intact = find_windows(base, 1.75, 28.5)
+        dropped = find_windows(masked, 1.75, 28.5)
+        assert len(intact) == len(dropped)
+        assert (intact["start"].values == dropped["start"].values).all()
+
+    def test_scattered_dropouts_do_not_collapse_the_wait(self):
+        """The over-correction. Without bridging this returned 28 h, not 2,724."""
+        base, masked = self._dropouts_in_rough_weather()
+        assert expected_waiting_hours(masked, 1.75, 28.5) == pytest.approx(
+            expected_waiting_hours(base, 1.75, 28.5), rel=0.05
+        )
+
+    def test_scattered_dropouts_do_not_censor_everything(self):
+        _, masked = self._dropouts_in_rough_weather()
+        # Unbridged this was 0.80.
+        assert window_statistics(masked, 1.75, 28.5)["censored_fraction"] < 0.20
+
+    def test_year_long_outage_is_not_counted_as_waiting(self):
+        """The original bug, in the form the real record takes.
+
+        load_station resamples onto a regular hourly grid, so an outage is a
+        block of NaN rows and the index never skips.
+        """
         intact = self._seasonal_hs()
         blanked = intact.copy()
         blanked[
             (blanked.index >= "2021-01-01") & (blanked.index < "2022-01-01")
         ] = np.nan
 
-        intact_wait = expected_waiting_hours(intact, 1.75, 28.5)
-        blanked_wait = expected_waiting_hours(blanked, 1.75, 28.5)
+        bridged_everything = expected_waiting_hours(
+            blanked, 1.75, 28.5, max_gap_hours=float("inf")
+        )
+        correct = expected_waiting_hours(blanked, 1.75, 28.5)
 
-        # Deleting observations must not make the site look worse. Pre-fix this
-        # rose from 2,724 h to 3,718 h.
-        assert blanked_wait <= intact_wait * 1.05
+        assert bridged_everything > correct
+        # Deleting observations must not make the site look worse.
+        assert correct <= expected_waiting_hours(intact, 1.75, 28.5) * 1.05
 
-    def test_nan_rows_break_a_run_even_on_a_regular_index(self):
-        """Guards the specific failure of the first attempted fix."""
-        index = pd.date_range("2016-01-01", periods=24 * 400, freq="1h")
-        hs = pd.Series(np.full(len(index), 3.0), index=index)
-        hs.iloc[:48] = 0.5      # one early window
-        hs.iloc[-48:] = 0.5     # one much later window
-        hs.iloc[100:5000] = np.nan
+    def test_tolerance_is_actually_reachable(self):
+        """Guards a trap this module walked into once already.
 
-        stats = window_statistics(hs, 1.75, 24.0)
-        # The index never skips, so only NaN-awareness can censor these.
-        assert stats["censored_fraction"] > 0.0
-        assert stats["expected_wait_hours"] < 24 * 400
+        max_gap_hours is a default argument, so it binds at definition time. A
+        caller rebinding the module-level DEFAULT_MAX_GAP_HOURS changes
+        nothing - the same failure mode as the sensitivity analysis that
+        rebound ANNUAL_OPERATIONS and silently returned baseline numbers for
+        every scenario. The parameter must be threaded, and this fails if it
+        stops being.
+        """
+        _, masked = self._dropouts_in_rough_weather()
+        strict = window_statistics(masked, 1.75, 28.5, max_gap_hours=0.0)
+        lenient = window_statistics(masked, 1.75, 28.5, max_gap_hours=24.0)
+        assert strict["expected_wait_hours"] != lenient["expected_wait_hours"]
+        assert strict["censored_fraction"] > lenient["censored_fraction"]
 
     def test_index_gaps_break_a_run_too(self):
         intact = self._seasonal_hs()
         removed = intact[
             ~((intact.index >= "2021-01-01") & (intact.index < "2022-01-01"))
         ]
-        assert expected_waiting_hours(removed, 1.75, 28.5) <= expected_waiting_hours(
-            intact, 1.75, 28.5
-        ) * 1.05
-
-    def test_censored_fraction_is_reported_and_finite(self):
-        stats = window_statistics(self._seasonal_hs(), 1.75, 28.5)
-        assert 0.0 <= stats["censored_fraction"] < 1.0
-        assert np.isfinite(stats["expected_wait_hours"])
+        assert expected_waiting_hours(removed, 1.75, 28.5) <= (
+            expected_waiting_hours(intact, 1.75, 28.5) * 1.05
+        )
 
     def test_censoring_rises_when_windows_are_scarce(self):
         hs = self._seasonal_hs()
         easy = window_statistics(hs, 1.75, 12.0)["censored_fraction"]
         hard = window_statistics(hs, 1.75, 240.0)["censored_fraction"]
         assert hard > easy
-
-    def test_missing_data_does_not_count_toward_censoring(self):
-        """Censoring is about rough seas, not offline sensors."""
-        intact = self._seasonal_hs()
-        blanked = intact.copy()
-        blanked[
-            (blanked.index >= "2021-01-01") & (blanked.index < "2022-01-01")
-        ] = np.nan
-
-        # Roughly a ninth of the record is blank; if unobserved rows counted as
-        # censored the fraction would jump by about that much.
-        assert window_statistics(blanked, 1.75, 28.5)["censored_fraction"] < (
-            window_statistics(intact, 1.75, 28.5)["censored_fraction"] + 0.10
-        )
 
 
 class TestCensoredButServicable:

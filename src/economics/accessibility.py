@@ -113,25 +113,84 @@ def _epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
     return pd.DatetimeIndex(index).asi8
 
 
-def _observed_segments(hs: pd.Series, step_hours: float) -> np.ndarray:
+#: Longest interruption that may be bridged when measuring a waiting time.
+#:
+#: Getting this wrong in either direction is catastrophic, and both mistakes
+#: were made here before the value existed.
+#:
+#: Bridge nothing, and every dropout censors the wait. NDBC coverage on these
+#: buoys runs 77-87% with the misses scattered hour by hour, so the mean run of
+#: strictly uninterrupted observation is 4-7 hours. Almost every wait then runs
+#: past the end of its run and is discarded, leaving only the shortest - which
+#: reported 0.5% downtime for a site with 45% accessibility and 2.7 workable
+#: windows in an average winter.
+#:
+#: Bridge everything, and a year-long outage is priced as a year of bad
+#: weather, which is where this started.
+#:
+#: A day is the compromise: long enough to absorb the routine dropouts that
+#: dominate these records, short enough that bridging adds at most 24 h of
+#: uncertainty to a wait measured in hundreds.
+DEFAULT_MAX_GAP_HOURS = 24.0
+
+
+def _bridged_observation(hs: pd.Series, max_gap_hours: float) -> np.ndarray:
+    """Observation mask with short interruptions filled in.
+
+    An interruption is bridged when it is flanked by observation on both sides
+    and spans no more than ``max_gap_hours``. A leading or trailing run of
+    missing data is never bridged - there is nothing on one side to bridge to.
+    """
+    observed = hs.notna().to_numpy()
+    n = len(observed)
+    if n == 0 or observed.all():
+        return observed
+
+    times = _epoch_ns(hs.index)
+    missing = ~observed
+
+    edges = np.diff(missing.astype(np.int8))
+    starts = np.flatnonzero(edges == 1) + 1
+    ends = np.flatnonzero(edges == -1) + 1  # exclusive
+    if missing[0]:
+        starts = np.concatenate([[0], starts])
+    if missing[-1]:
+        ends = np.concatenate([ends, [n]])
+
+    flanked = (starts > 0) & (ends < n)
+    span_hours = (
+        times[np.minimum(ends, n - 1)] - times[np.maximum(starts - 1, 0)]
+    ) / 3.6e12
+
+    bridged = observed.copy()
+    for start, end in zip(starts[flanked & (span_hours <= max_gap_hours)],
+                          ends[flanked & (span_hours <= max_gap_hours)]):
+        bridged[start:end] = True
+    return bridged
+
+
+def _observed_segments(
+    hs: pd.Series,
+    step_hours: float,
+    max_gap_hours: float = DEFAULT_MAX_GAP_HOURS,
+) -> np.ndarray:
     """For each timestep, the end time of its run of continuous observation.
 
-    A "run" breaks on a gap in the index *or* on a missing value, because both
-    mean the same thing: the record stops telling us what the sea was doing. A
-    waiting time may only be measured inside one run - measuring across a
-    break asserts something about hours that were never observed.
+    A run breaks on a sustained interruption - a gap in the index *or* a block
+    of missing values longer than ``max_gap_hours``. Both mean the same thing:
+    the record stopped telling us what the sea was doing for long enough that a
+    wait cannot be timed across it.
 
-    The missing-value half matters more than the index half here.
+    The missing-value half matters more than the index half.
     :func:`~src.data.ndbc.load_station` resamples onto a regular hourly grid,
     so an outage appears as a block of NaN rows and the index stays perfectly
     continuous. Splitting on index gaps alone would find nothing to split.
 
     Returns:
-        Array of segment end times as epoch nanoseconds, ``-1`` wherever the
-        observation is missing. Integers rather than datetimes because the
-        index may be timezone-aware, in which case ``to_numpy()`` hands back
-        an object array of Timestamps that will not compare against
-        ``datetime64``.
+        Array of segment end times as epoch nanoseconds, ``-1`` outside any
+        run. Integers rather than datetimes because the index may be
+        timezone-aware, in which case ``to_numpy()`` hands back an object array
+        of Timestamps that will not compare against ``datetime64``.
     """
     index = hs.index
     n = len(index)
@@ -139,12 +198,12 @@ def _observed_segments(hs: pd.Series, step_hours: float) -> np.ndarray:
         return np.array([], dtype="int64")
 
     times = _epoch_ns(index)
-    observed = hs.notna().to_numpy()
+    observed = _bridged_observation(hs, max_gap_hours)
 
     continues = np.ones(n, dtype=bool)
     if n > 1:
         gaps = np.diff(times) / 3.6e12  # nanoseconds to hours
-        continues[1:] = gaps <= step_hours * 1.5
+        continues[1:] = gaps <= max(step_hours * 1.5, max_gap_hours)
 
     previously_observed = np.concatenate([[False], observed[:-1]])
     begins = observed & (~previously_observed | ~continues)
@@ -166,6 +225,7 @@ def _waiting_hours_array(
     hs: pd.Series,
     threshold_m: float,
     required_hours: float,
+    max_gap_hours: float = DEFAULT_MAX_GAP_HOURS,
 ) -> tuple:
     """Per-timestep waiting time, NaN where the wait cannot be observed.
 
@@ -191,7 +251,7 @@ def _waiting_hours_array(
     # accessible of the three, needing the shortest window, and offering the
     # most windows per year. Those three facts contradicting the fourth is what
     # exposed it.
-    segment_ends = _observed_segments(hs, _median_step_hours(index))
+    segment_ends = _observed_segments(hs, _median_step_hours(index), max_gap_hours)
 
     positions = np.searchsorted(starts, times, side="left")
     found = positions < len(starts)
@@ -214,6 +274,7 @@ def expected_waiting_hours(
     hs: pd.Series,
     threshold_m: float,
     required_hours: float,
+    max_gap_hours: float = DEFAULT_MAX_GAP_HOURS,
 ) -> float:
     """Mean wait from an arbitrary moment until a usable window opens.
 
@@ -236,7 +297,9 @@ def expected_waiting_hours(
     Returns:
         Mean waiting hours, or NaN if no adequate window exists in the record.
     """
-    waits, windows = _waiting_hours_array(hs, threshold_m, required_hours)
+    waits, windows = _waiting_hours_array(
+        hs, threshold_m, required_hours, max_gap_hours
+    )
     if windows.empty or np.all(np.isnan(waits)):
         return float("nan")
     return float(np.nanmean(waits))
@@ -246,6 +309,7 @@ def window_statistics(
     hs: pd.Series,
     threshold_m: float,
     required_hours: float,
+    max_gap_hours: float = DEFAULT_MAX_GAP_HOURS,
 ) -> dict:
     """Full accessibility summary for one working limit and job length.
 
@@ -253,16 +317,21 @@ def window_statistics(
         dict with the accessible fraction, window counts and durations, the
         expected wait, and the implied annual standby hours.
     """
-    waits, windows = _waiting_hours_array(hs, threshold_m, required_hours)
+    waits, windows = _waiting_hours_array(
+        hs, threshold_m, required_hours, max_gap_hours
+    )
     record_hours = _record_hours(hs)
     years = record_hours / HOURS_PER_YEAR if record_hours else float("nan")
-    # Censoring is measured among *observed* timesteps. Counting the missing
-    # ones would conflate "the sea was too rough for a long time" with "the
-    # sensor was offline", which is the confusion this whole change is about.
-    observed = hs.notna().to_numpy()
+    # Censoring is measured among timesteps that sit inside a run of
+    # observation. Counting the ones outside would conflate "the sea was too
+    # rough for a long time" with "the sensor was offline for a long time",
+    # which is the confusion this whole change is about.
+    inside_run = (
+        _observed_segments(hs, _median_step_hours(hs.index), max_gap_hours) >= 0
+    )
     censored = (
-        float(np.mean(np.isnan(waits[observed])))
-        if observed.any()
+        float(np.mean(np.isnan(waits[inside_run])))
+        if inside_run.any()
         else float("nan")
     )
 
