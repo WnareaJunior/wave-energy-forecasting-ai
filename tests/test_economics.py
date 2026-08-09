@@ -17,12 +17,22 @@ from src.economics.accessibility import (
     seasonal_accessibility,
     window_statistics,
 )
+from src.config import (
+    NDBC_STATIONS,
+    PORT_CLASS_HEAVY,
+    PORT_CLASS_LIGHT,
+    PORT_CLASS_WORKBOAT,
+    Port,
+    great_circle_km,
+    nearest_port,
+)
 from src.economics.deployment import (
     AHTS,
     ANNUAL_OPERATIONS,
     CTV,
     DEFAULT_STANDBY_CAP_HOURS,
     SiteLogistics,
+    site_logistics,
     false_start_multiplier,
     mooring_capex,
     operation_cost,
@@ -421,3 +431,166 @@ class TestSiteEvaluation:
         assert dear["gross_annual_usd"] == pytest.approx(
             4 * cheap["gross_annual_usd"], rel=0.01
         )
+
+
+class TestPortAssignment:
+    """The support port is a property of (site, vessel), not of the site.
+
+    The model originally costed every vessel at every site from a single base
+    at Grays Harbor. That charged the Neah Bay buoy a 183 km transit for a
+    routine inspection when the town of Neah Bay is 16 km away, and it did so
+    at the one site where the forecast postprocessing showed real skill. These
+    tests pin the corrected behaviour, including the constraint that made the
+    original assumption tempting: a harbour that can take a crew boat cannot
+    necessarily take an anchor handler.
+    """
+
+    def test_port_class_ordering_is_a_ceiling_not_a_list(self):
+        small = Port("small", 48.0, -124.0, PORT_CLASS_LIGHT)
+        big = Port("big", 48.0, -124.0, PORT_CLASS_HEAVY)
+
+        assert small.can_host(PORT_CLASS_LIGHT)
+        assert not small.can_host(PORT_CLASS_WORKBOAT)
+        assert not small.can_host(PORT_CLASS_HEAVY)
+        # A heavy port takes everything smaller too.
+        assert all(
+            big.can_host(c)
+            for c in (PORT_CLASS_LIGHT, PORT_CLASS_WORKBOAT, PORT_CLASS_HEAVY)
+        )
+
+    def test_rejects_unknown_class(self):
+        with pytest.raises(ValueError):
+            Port("bad", 48.0, -124.0, "supertanker")
+        with pytest.raises(ValueError):
+            Port("ok", 48.0, -124.0).can_host("supertanker")
+
+    def test_nearest_port_refuses_rather_than_downgrading(self):
+        """No capable port must raise, not silently return an unusable one.
+
+        Falling back to the closest port regardless of class would reintroduce
+        precisely the error this module exists to correct, and it would do it
+        invisibly.
+        """
+        light_only = (Port("tiny", 48.0, -124.0, PORT_CLASS_LIGHT),)
+        with pytest.raises(ValueError):
+            nearest_port(48.5, -124.7, PORT_CLASS_HEAVY, light_only)
+
+    def test_anchor_handler_is_not_based_at_neah_bay(self):
+        """The regression that motivated the whole change, from the other side.
+
+        Neah Bay is by far the closest harbour to buoy 46087, so a
+        class-blind nearest-port rule would put the tow-out spread there. It
+        has no quay or laydown for a 61 m spar.
+        """
+        station = NDBC_STATIONS["46087"]
+        site = site_logistics(station.latitude, station.longitude)
+
+        assert "Neah Bay" not in site.port_for(AHTS)
+        assert "Neah Bay" in site.port_for(CTV)
+
+    def test_service_and_towout_distances_differ_by_an_order_of_magnitude(self):
+        station = NDBC_STATIONS["46087"]
+        site = site_logistics(station.latitude, station.longitude)
+
+        assert site.distance_for(CTV) < 25.0
+        assert site.distance_for(AHTS) > 90.0
+        assert site.distance_for(AHTS) > 4 * site.distance_for(CTV)
+
+    def test_single_distance_construction_still_works(self):
+        """The old one-distance form must be unchanged for every vessel.
+
+        Most of this file builds sites that way, and the fallback is what lets
+        the two coexist.
+        """
+        site = SiteLogistics(distance_km=75.0)
+        assert site.distance_for(AHTS) == 75.0
+        assert site.distance_for(CTV) == 75.0
+        assert site.port_for(AHTS) == site.port_name
+
+    def test_correct_basing_shortens_the_required_window(self):
+        """The point of the fix: a shorter transit needs a shorter calm spell.
+
+        Long windows are disproportionately rarer than short ones, so this is
+        the channel through which the port assumption reached downtime.
+        """
+        station = NDBC_STATIONS["46087"]
+        correct = site_logistics(station.latitude, station.longitude)
+        single_port = SiteLogistics(distance_km=correct.distance_for(AHTS))
+
+        operation = [op for op in ANNUAL_OPERATIONS if "Unscheduled" in op.name][0]
+        assert window_hours_required(
+            operation, correct.distance_for(operation.vessel)
+        ) < window_hours_required(operation, single_port.distance_km)
+
+    def test_downtime_falls_when_vessels_are_based_correctly(self):
+        hs = make_hs(mean=2.2, seed=11)
+        station = NDBC_STATIONS["46087"]
+        correct = site_logistics(station.latitude, station.longitude)
+        single_port = SiteLogistics(distance_km=183.4, water_depth_m=correct.water_depth_m)
+
+        assert downtime_fraction(hs, correct) < downtime_fraction(hs, single_port)
+
+    def test_evaluate_site_reports_both_distances(self):
+        hs = make_hs(seed=5)
+        flux = 490.0 * hs**2 * 8.0
+        station = NDBC_STATIONS["46087"]
+        site = site_logistics(station.latitude, station.longitude)
+
+        result = evaluate_site(hs, flux, site)
+        assert result["distance_km"] == pytest.approx(site.distance_for(AHTS))
+        assert result["service_distance_km"] < result["distance_km"]
+
+    def test_great_circle_matches_known_separation(self):
+        # One degree of latitude is ~111.2 km anywhere on the globe.
+        assert great_circle_km(47.0, -124.0, 48.0, -124.0) == pytest.approx(111.2, abs=0.5)
+        assert great_circle_km(47.0, -124.0, 47.0, -124.0) == 0.0
+
+
+class TestUnservicableSites:
+    """A site too rough to service must be the worst case, not the best.
+
+    ``expected_waiting_hours`` returns NaN when the record holds no window long
+    enough to do the job at all. Every consumer used to coerce that to a zero
+    wait, so the least accessible possible site scored as perfectly
+    accessible. The bug was invisible on the real buoy records - windows exist
+    at all three - and only surfaced when a shorter required window made the
+    comparison site cross the threshold in the opposite direction.
+    """
+
+    @staticmethod
+    def _brutal_hs():
+        # Never below any vessel's working limit, so no window ever opens.
+        index = pd.date_range("2016-01-01", periods=24 * 365 * 2, freq="1h")
+        return pd.Series(np.full(len(index), 6.0), index=index)
+
+    def test_no_window_means_total_downtime(self):
+        assert downtime_fraction(self._brutal_hs(), SiteLogistics(distance_km=60)) == 1.0
+
+    def test_unservicable_is_worse_than_merely_difficult(self):
+        """The ordering that the NaN-to-zero coercion inverted."""
+        difficult = make_hs(mean=3.0, amplitude=1.5, seed=7)
+        impossible = self._brutal_hs()
+        site = SiteLogistics(distance_km=60)
+
+        assert downtime_fraction(impossible, site) >= downtime_fraction(difficult, site)
+
+    def test_unservicable_site_is_not_cheaper(self):
+        difficult = make_hs(mean=3.0, amplitude=1.5, seed=7)
+        site = SiteLogistics(distance_km=60)
+
+        impossible_cost = annual_om_cost(self._brutal_hs(), site)["total_annual_usd"]
+        difficult_cost = annual_om_cost(difficult, site)["total_annual_usd"]
+        assert impossible_cost >= difficult_cost
+
+    def test_charged_wait_is_capped_not_infinite(self):
+        """Finite cost, so the model stays comparable across sites."""
+        detail = annual_om_cost(self._brutal_hs(), SiteLogistics(distance_km=60))["detail"]
+        assert (detail["charged_wait_hours"] <= DEFAULT_STANDBY_CAP_HOURS).all()
+        assert np.isfinite(detail["annual_usd"]).all()
+
+    def test_evaluate_site_survives_an_unservicable_record(self):
+        hs = self._brutal_hs()
+        result = evaluate_site(hs, 490.0 * hs**2 * 8.0, SiteLogistics(distance_km=60))
+        assert result["downtime_fraction"] == 1.0
+        assert result["delivered_annual_usd"] == pytest.approx(0.0)
+        assert np.isfinite(result["net_annual_usd"])

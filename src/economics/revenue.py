@@ -26,6 +26,7 @@ import pandas as pd
 from src.economics.accessibility import window_statistics
 from src.economics.deployment import (
     ANNUAL_OPERATIONS,
+    DEFAULT_STANDBY_CAP_HOURS,
     DEPLOYMENT_OPERATIONS,
     RETRIEVAL_OPERATIONS,
     SiteLogistics,
@@ -36,6 +37,30 @@ from src.economics.deployment import (
 )
 
 HOURS_PER_YEAR = 8766.0
+
+
+def _wait_hours(stats: dict) -> tuple:
+    """Expected wait, plus whether the job is impossible at this site.
+
+    :func:`~src.economics.accessibility.expected_waiting_hours` returns NaN
+    when the record contains no window long enough to do the job *at all*.
+    Every call site here used to read that NaN as a zero wait, which scored
+    the least accessible possible site as perfectly accessible - and it did so
+    silently, because NaN-to-zero looks like ordinary missing-data hygiene.
+
+    The failure is not hypothetical: it inverts the ranking exactly where the
+    model is supposed to be discriminating. A site whose required window is
+    just barely achievable reports a long wait and a large penalty, while a
+    site whose window is fractionally too long reports no wait and none.
+
+    Returns:
+        ``(wait_hours, unservicable)``. ``wait_hours`` is NaN when
+        unservicable; callers decide what that costs.
+    """
+    wait = stats["expected_wait_hours"]
+    if pd.isna(wait):
+        return float("nan"), True
+    return float(wait), False
 
 
 @dataclass(frozen=True)
@@ -201,20 +226,28 @@ def annual_om_cost(
     seen_vessels = set()
 
     for operation in operations:
-        required = window_hours_required(operation, site.distance_km)
+        # Distance is a property of (site, vessel), not of the site: a crew
+        # boat and an anchor handler sail from different ports.
+        distance = site.distance_for(operation.vessel)
+        required = window_hours_required(operation, distance)
         stats = window_statistics(hs, operation.vessel.max_hs_operate_m, required)
-        wait = stats["expected_wait_hours"]
-        wait = 0.0 if pd.isna(wait) else wait
+        wait, unservicable = _wait_hours(stats)
+        # No window ever long enough: the vessel still mobilises, sits out the
+        # standby cap and demobilises. Charging the cap keeps the cost finite
+        # while making the site the most expensive rather than the cheapest.
+        wait = DEFAULT_STANDBY_CAP_HOURS if unservicable else wait
 
         first_of_vessel = operation.vessel.name not in seen_vessels
         seen_vessels.add(operation.vessel.name)
 
         cost = operation_cost(
             operation,
-            site.distance_km,
+            distance,
             waiting_hours=wait,
             include_mobilisation=first_of_vessel,
         )
+        cost["port"] = site.port_for(operation.vessel)
+        cost["distance_km"] = distance
         # Mobilising against an imperfect forecast means some sailings abort
         # and are paid for anyway.
         multiplier = false_start_multiplier(
@@ -245,14 +278,15 @@ def campaign_cost(hs: pd.Series, site: SiteLogistics, operations) -> float:
     total = 0.0
     seen_vessels = set()
     for operation in operations:
-        required = window_hours_required(operation, site.distance_km)
+        distance = site.distance_for(operation.vessel)
+        required = window_hours_required(operation, distance)
         stats = window_statistics(hs, operation.vessel.max_hs_operate_m, required)
-        wait = stats["expected_wait_hours"]
-        wait = 0.0 if pd.isna(wait) else wait
+        wait, unservicable = _wait_hours(stats)
+        wait = DEFAULT_STANDBY_CAP_HOURS if unservicable else wait
         first_of_vessel = operation.vessel.name not in seen_vessels
         seen_vessels.add(operation.vessel.name)
         total += operation_cost(
-            operation, site.distance_km, wait, include_mobilisation=first_of_vessel
+            operation, distance, wait, include_mobilisation=first_of_vessel
         )["total_usd"]
     return total
 
@@ -275,10 +309,13 @@ def downtime_fraction(
 
     total_down = 0.0
     for operation in unscheduled:
-        required = window_hours_required(operation, site.distance_km)
+        required = window_hours_required(operation, site.distance_for(operation.vessel))
         stats = window_statistics(hs, operation.vessel.max_hs_operate_m, required)
-        wait = stats["expected_wait_hours"]
-        wait = 0.0 if pd.isna(wait) else wait
+        wait, unservicable = _wait_hours(stats)
+        if unservicable:
+            # A repair that can never be attempted means the device is down
+            # for good. Full downtime, not zero.
+            return 1.0
         total_down += (wait + required) * operation.per_year
 
     return min(total_down / HOURS_PER_YEAR, 1.0)
@@ -322,8 +359,20 @@ def evaluate_site(
         + retrieve / device.design_life_years
     )
 
+    # The tow-out distance and the service distance are different numbers and
+    # answer different questions: the first sets capex, the second sets O&M and
+    # downtime. Reporting only the first is what made Neah Bay look unservicable.
+    service_vessels = {op.vessel for op in (operations or ANNUAL_OPERATIONS)}
+    service_distance = (
+        max(site.distance_for(v) for v in service_vessels)
+        if service_vessels
+        else site.distance_km
+    )
+
     return {
         "distance_km": site.distance_km,
+        "service_distance_km": service_distance,
+        "port_name": site.port_name,
         "mean_flux_kw_per_m": float(power_flux_w_per_m.mean() / 1000.0),
         "annual_energy_mwh": energy["annual_energy_mwh"],
         "capacity_factor": energy["capacity_factor"],

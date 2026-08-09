@@ -31,7 +31,15 @@ be done from a smaller vessel; a component failure needs the tug back.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from src.config import (
+    PORT_CLASS_HEAVY,
+    PORT_CLASS_LIGHT,
+    PORT_CLASS_WORKBOAT,
+    SUPPORT_PORTS,
+    nearest_port,
+)
 
 #: Nautical mile in kilometres.
 KM_PER_NM = 1.852
@@ -51,6 +59,8 @@ class Vessel:
             Higher than the working limit - transiting is easier than lifting.
         mobilisation_usd: One-off cost to bring the vessel to the region and
             release it, independent of the job length.
+        port_class: Smallest class of port that can host this vessel. Decides
+            which support base it sails from, and therefore its transit.
     """
 
     name: str
@@ -59,6 +69,7 @@ class Vessel:
     max_hs_operate_m: float
     max_hs_transit_m: float
     mobilisation_usd: float = 0.0
+    port_class: str = PORT_CLASS_HEAVY
 
 
 #: Anchor-handling tug / supply vessel. Tow-out, mooring pre-lay and hookup, and
@@ -72,6 +83,7 @@ AHTS = Vessel(
     max_hs_operate_m=2.0,
     max_hs_transit_m=3.5,
     mobilisation_usd=250_000,
+    port_class=PORT_CLASS_HEAVY,
 )
 
 #: Multi-purpose workboat for mooring inspection and light intervention.
@@ -82,6 +94,7 @@ MULTICAT = Vessel(
     max_hs_operate_m=1.75,
     max_hs_transit_m=3.0,
     mobilisation_usd=75_000,
+    port_class=PORT_CLASS_WORKBOAT,
 )
 
 #: Crew transfer vessel for inspection and sensor work. Fast and cheap, but the
@@ -94,6 +107,7 @@ CTV = Vessel(
     max_hs_operate_m=1.5,
     max_hs_transit_m=2.5,
     mobilisation_usd=0.0,
+    port_class=PORT_CLASS_LIGHT,
 )
 
 
@@ -144,18 +158,95 @@ ANNUAL_OPERATIONS = (
 
 
 @dataclass(frozen=True)
+class VesselBase:
+    """Where one vessel class sails from, and how far it has to go."""
+
+    vessel_name: str
+    port_name: str
+    distance_km: float
+
+
+@dataclass(frozen=True)
 class SiteLogistics:
     """Distance and port context for a candidate site.
 
     Args:
-        distance_km: Great-circle distance from the support port.
-        port_name: Label for the assumed base of operations.
+        distance_km: Distance from the primary support port - the one the
+            heavy tow-out spread uses. Also the fallback for any vessel with
+            no explicit base, which keeps the single-distance construction
+            ``SiteLogistics(distance_km=50)`` working as before.
+        port_name: Label for the primary base of operations.
         water_depth_m: Drives mooring cost and pre-lay duration.
+        bases: Per-vessel bases, from :func:`site_logistics`. A tuple rather
+            than a dict so the dataclass stays hashable.
     """
 
     distance_km: float
     port_name: str = "Grays Harbor, WA"
     water_depth_m: float = 100.0
+    bases: tuple = field(default=())
+
+    def distance_for(self, vessel: Vessel) -> float:
+        """Transit distance for one vessel class.
+
+        Falls back to :attr:`distance_km` when the vessel has no assigned
+        base, so a site built the old way behaves exactly as it used to.
+        """
+        for base in self.bases:
+            if base.vessel_name == vessel.name:
+                return base.distance_km
+        return self.distance_km
+
+    def port_for(self, vessel: Vessel) -> str:
+        """Support port for one vessel class."""
+        for base in self.bases:
+            if base.vessel_name == vessel.name:
+                return base.port_name
+        return self.port_name
+
+
+def site_logistics(
+    latitude: float,
+    longitude: float,
+    water_depth_m: float = 100.0,
+    vessels: tuple = (AHTS, MULTICAT, CTV),
+    ports: tuple = SUPPORT_PORTS,
+) -> SiteLogistics:
+    """Build site logistics by basing each vessel at its nearest capable port.
+
+    This is the correction to the model's original single-port assumption.
+    Because an anchor handler and a crew boat cannot use the same harbours,
+    the transit distance is a property of the *pair* (site, vessel), not of
+    the site alone - and for a site tucked near a small harbour the two can
+    differ by an order of magnitude.
+
+    The primary distance and port are taken from the heaviest vessel supplied,
+    since that is the tow-out passage and the closest thing to a meaningful
+    "how far offshore is it" figure.
+
+    Args:
+        latitude: Site latitude.
+        longitude: Site longitude, degrees east.
+        water_depth_m: Water depth at the site.
+        vessels: Vessel classes needing a base.
+        ports: Candidate support ports.
+    """
+    bases = []
+    for vessel in vessels:
+        port, distance = nearest_port(latitude, longitude, vessel.port_class, ports)
+        bases.append(VesselBase(vessel.name, port.name, distance))
+
+    heaviest = max(
+        vessels, key=lambda v: (v.port_class == PORT_CLASS_HEAVY, v.day_rate_usd)
+    )
+    primary = next(b for b in bases if b.vessel_name == heaviest.name)
+
+    return SiteLogistics(
+        distance_km=primary.distance_km,
+        port_name=primary.port_name,
+        water_depth_m=water_depth_m,
+        bases=tuple(bases),
+    )
 
 
 def transit_hours(distance_km: float, vessel: Vessel) -> float:

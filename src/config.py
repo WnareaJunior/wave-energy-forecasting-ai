@@ -104,6 +104,176 @@ PILOT_STATIONS = ("46041", "46087", "46029")
 
 
 # --------------------------------------------------------------------------
+# Support ports
+# --------------------------------------------------------------------------
+#
+# Marine operations are costed from the port the vessel actually sails from,
+# and different vessels sail from different ports. An earlier version of the
+# economics assumed a single base (Grays Harbor) for every site and every
+# vessel, which charged the Neah Bay buoy a 183 km transit for a routine
+# inspection when the town of Neah Bay is 16 km away. That is not a
+# conservative assumption, it is a wrong one, and it fell hardest on the only
+# site where the forecast postprocessing showed real skill.
+#
+# The constraint that makes this non-trivial is that a harbour big enough for
+# a crew boat is not big enough for an anchor handler towing a 61 m spar. So
+# ports advertise which size class they can take, and each vessel is based at
+# the nearest port that can actually host it.
+
+#: Crew boats and similar: shallow draft, no lifting requirement.
+PORT_CLASS_LIGHT = "light"
+#: Multicats and workboats: moderate draft, modest quay and crane.
+PORT_CLASS_WORKBOAT = "workboat"
+#: Anchor handlers and tow-out spreads: deep draft, laydown, heavy quay.
+PORT_CLASS_HEAVY = "heavy"
+
+ALL_PORT_CLASSES = frozenset(
+    {PORT_CLASS_LIGHT, PORT_CLASS_WORKBOAT, PORT_CLASS_HEAVY}
+)
+
+#: A port can host anything at or below its own class, so the classes are
+#: ordered rather than independent.
+_PORT_CLASS_ORDER = (PORT_CLASS_LIGHT, PORT_CLASS_WORKBOAT, PORT_CLASS_HEAVY)
+
+
+@dataclass(frozen=True)
+class Port:
+    """A support base, with the largest vessel class it can host.
+
+    Positions are approximate harbour entrances. They are used for transit
+    distance, where a kilometre either way does not change a siting decision.
+
+    Args:
+        name: Label.
+        latitude: Degrees north.
+        longitude: Degrees east, negative for west.
+        max_class: Largest vessel class the port can accommodate. A port that
+            can take an anchor handler can also take a crew boat, so this is a
+            ceiling rather than a list.
+        note: Why the class was assigned, so the judgement can be argued with.
+    """
+
+    name: str
+    latitude: float
+    longitude: float
+    max_class: str = PORT_CLASS_HEAVY
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        if self.max_class not in ALL_PORT_CLASSES:
+            raise ValueError(
+                f"{self.name}: max_class must be one of {sorted(ALL_PORT_CLASSES)}, "
+                f"got {self.max_class!r}"
+            )
+
+    def can_host(self, port_class: str) -> bool:
+        """Whether this port can accommodate a vessel of the given class."""
+        if port_class not in ALL_PORT_CLASSES:
+            raise ValueError(f"unknown port class {port_class!r}")
+        return _PORT_CLASS_ORDER.index(port_class) <= _PORT_CLASS_ORDER.index(
+            self.max_class
+        )
+
+    def distance_km(self, latitude: float, longitude: float) -> float:
+        """Great-circle distance from this port to a position."""
+        return great_circle_km(self.latitude, self.longitude, latitude, longitude)
+
+
+#: Ports on the Washington and northern Oregon coast that could plausibly
+#: support a demonstration deployment. Class assignments are planning
+#: judgements, not port-authority statements, and each carries its reasoning.
+#:
+#: Straight-line distance is used throughout. It understates a real routed
+#: passage - most of all for Port Angeles, where the run to the open coast is
+#: down the Strait of Juan de Fuca rather than across the peninsula - so
+#: heavy-vessel transits from inside the Strait are optimistic.
+SUPPORT_PORTS = (
+    Port(
+        "Grays Harbor (Westport), WA",
+        46.90,
+        -124.10,
+        PORT_CLASS_HEAVY,
+        note="Deep-draft commercial harbour with marine-industrial quay.",
+    ),
+    Port(
+        "Astoria, OR",
+        46.19,
+        -123.83,
+        PORT_CLASS_HEAVY,
+        note="Deep-draft. The Columbia River bar is itself a weather-limited "
+        "crossing, which this model does not yet charge for.",
+    ),
+    Port(
+        "Port Angeles, WA",
+        48.12,
+        -123.44,
+        PORT_CLASS_HEAVY,
+        note="Deep-water harbour with laydown; hosts large marine "
+        "construction spreads. Inside the Strait of Juan de Fuca, so the "
+        "straight-line distance to an open-coast site flatters it.",
+    ),
+    Port(
+        "Neah Bay, WA",
+        48.37,
+        -124.61,
+        PORT_CLASS_WORKBOAT,
+        note="Harbour of refuge and standby rescue-tug station, but no quay "
+        "or laydown for a 61 m spar campaign.",
+    ),
+    Port(
+        "La Push, WA",
+        47.91,
+        -124.64,
+        PORT_CLASS_LIGHT,
+        note="Small and shallow with a hazardous bar; crew boats only.",
+    ),
+)
+
+
+def great_circle_km(
+    lat1: float, lon1: float, lat2: float, lon2: float
+) -> float:
+    """Great-circle distance in kilometres between two positions."""
+    from math import asin, cos, radians, sin, sqrt
+
+    earth_radius_km = 6371.0088
+    phi1, phi2 = radians(lat1), radians(lat2)
+    dphi = phi2 - phi1
+    dlambda = radians(lon2 - lon1)
+    h = sin(dphi / 2) ** 2 + cos(phi1) * cos(phi2) * sin(dlambda / 2) ** 2
+    return 2 * earth_radius_km * asin(sqrt(h))
+
+
+def nearest_port(
+    latitude: float,
+    longitude: float,
+    port_class: str = PORT_CLASS_HEAVY,
+    ports: tuple = SUPPORT_PORTS,
+) -> tuple:
+    """Closest port able to host the given vessel class.
+
+    Args:
+        latitude: Site latitude.
+        longitude: Site longitude, degrees east.
+        port_class: Vessel size class needing a base.
+        ports: Candidate ports.
+
+    Returns:
+        ``(port, distance_km)``.
+
+    Raises:
+        ValueError: If no candidate port can host the class. Silently falling
+            back to a port that cannot take the vessel would reintroduce
+            exactly the error this module exists to fix.
+    """
+    capable = [p for p in ports if p.can_host(port_class)]
+    if not capable:
+        raise ValueError(f"no port in the list can host class {port_class!r}")
+    best = min(capable, key=lambda p: p.distance_km(latitude, longitude))
+    return best, best.distance_km(latitude, longitude)
+
+
+# --------------------------------------------------------------------------
 # Datasets
 # --------------------------------------------------------------------------
 
