@@ -182,11 +182,11 @@ def run_station(station: str, args) -> pd.DataFrame:
     )
 
     dates = daily_dates(f"{start_year}-01-01", f"{end_year}-12-31", args.stride)
-    logger.info(
-        "Extracting %d GEFS cycles (member %s, stride %d)",
-        len(dates), args.member, args.stride,
-    )
     members = [m.strip() for m in args.members.split(",") if m.strip()]
+    logger.info(
+        "Extracting %d GEFS cycles x %d member(s) (%s), stride %d",
+        len(dates), len(members), ", ".join(members), args.stride,
+    )
     if len(members) == 1:
         forecasts = build_forecast_dataset(
             dates, [station], member=members[0], workers=args.workers
