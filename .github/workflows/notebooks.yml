@@ -1,0 +1,92 @@
+name: Notebooks
+
+# Executes the notebooks end to end against real NDBC data.
+#
+# The static tests in tests/test_notebooks.py catch renamed symbols and syntax
+# errors, but they cannot catch a cell that raises at runtime. Only running
+# them does, and running them needs network access to ndbc.noaa.gov - which
+# this repository's development sessions do not have.
+#
+# Executed copies are uploaded as an artifact, so the rendered figures and
+# tables are available without anyone re-running them locally.
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - claude/forecasting-model-architecture-s5180n
+    paths:
+      - "notebooks/**"
+      - "src/**"
+      - ".github/workflows/notebooks.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  execute:
+    name: Execute notebooks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-pilot.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-pilot.txt
+          pip install matplotlib nbclient nbformat ipykernel
+
+      - name: Check NDBC is reachable
+        run: |
+          python - <<'PY'
+          import sys
+          import requests
+          url = "https://www.ndbc.noaa.gov/data/historical/stdmet/46041h2016.txt.gz"
+          try:
+              r = requests.get(url, timeout=30, stream=True)
+              r.close()
+              assert r.ok, f"HTTP {r.status_code}"
+          except Exception as e:
+              sys.exit(f"cannot reach ndbc.noaa.gov: {e}")
+          print("reachable")
+          PY
+
+      # Every notebook runs even if an earlier one fails, so one broken cell
+      # does not hide the state of the others.
+      - name: Execute
+        run: |
+          mkdir -p executed
+          status=0
+          for nb in notebooks/*.ipynb; do
+            echo "=============================================================="
+            echo "Executing $nb"
+            echo "=============================================================="
+            if python -m nbclient "$nb" \
+                 --output-dir=executed \
+                 --timeout=1200 \
+                 --kernel-name=python3; then
+              echo "OK   $nb"
+            else
+              echo "FAIL $nb"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Upload executed notebooks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: executed-notebooks-run${{ github.run_number }}
+          path: executed/
+          if-no-files-found: warn
+          retention-days: 30
