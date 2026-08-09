@@ -60,27 +60,11 @@ jobs:
           print("reachable")
           PY
 
-      # Every notebook runs even if an earlier one fails, so one broken cell
-      # does not hide the state of the others.
+      # The runner is a script, not inline YAML, so it can be run by hand the
+      # same way and can report which cell failed with its source. Every
+      # notebook is attempted even after one fails.
       - name: Execute
-        run: |
-          mkdir -p executed
-          status=0
-          for nb in notebooks/*.ipynb; do
-            echo "=============================================================="
-            echo "Executing $nb"
-            echo "=============================================================="
-            if python -m nbclient "$nb" \
-                 --output-dir=executed \
-                 --timeout=1200 \
-                 --kernel-name=python3; then
-              echo "OK   $nb"
-            else
-              echo "FAIL $nb"
-              status=1
-            fi
-          done
-          exit $status
+        run: python scripts/execute_notebooks.py --output-dir executed --timeout 1200
 
       - name: Upload executed notebooks
         if: always()
