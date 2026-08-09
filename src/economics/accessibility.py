@@ -109,8 +109,19 @@ def _median_step_hours(index: pd.DatetimeIndex) -> float:
 
 
 def _epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
-    """Index as int64 nanoseconds since the epoch, timezone or not."""
-    return pd.DatetimeIndex(index).asi8
+    """Index as int64 **nanoseconds** since the epoch, timezone or not.
+
+    ``asi8`` returns the raw int64 in the index's *own* resolution, which is
+    not always nanoseconds. pandas 3 parses text dates to microsecond
+    resolution while ``pd.date_range`` produces nanoseconds, so the real NDBC
+    records arrive as ``datetime64[us, UTC]`` and every synthetic fixture
+    built with ``date_range`` arrives as ``datetime64[ns, UTC]``.
+
+    Reading ``asi8`` without normalising made every duration here 1000x too
+    small on the real data and exactly right on every test. The maximum
+    waiting time across a nine-year record came out at 7.3 hours.
+    """
+    return pd.DatetimeIndex(index).as_unit("ns").asi8
 
 
 #: Longest interruption that may be bridged when measuring a waiting time.

@@ -776,3 +776,60 @@ class TestCensoredButServicable:
 
         assert window_statistics(hs, 1.75, 32.0)["n_windows"] == 0
         assert window_statistics(hs, 1.75, 12.0)["n_windows"] > 0
+
+
+@pytest.mark.parametrize("unit", ["ns", "us", "ms"])
+class TestDatetimeResolutionIndependence:
+    """Results must not depend on the index's datetime resolution.
+
+    Every duration in this module was computed by reading `.asi8` and dividing
+    by nanoseconds per hour. `.asi8` returns the raw int64 in the index's *own*
+    unit, and pandas 3 parses text dates to microseconds while `pd.date_range`
+    produces nanoseconds. So the real NDBC records were 1000x off and every
+    synthetic fixture in this file was exactly right - the bug was invisible to
+    the entire suite by construction.
+
+    It surfaced as a maximum waiting time of 7.3 hours across a nine-year
+    record at a site reachable 41% of the time. Parametrising over the unit is
+    what makes it impossible to reintroduce.
+    """
+
+    @staticmethod
+    def _series(unit):
+        rng = np.random.default_rng(0)
+        n = 8760 * 3
+        index = pd.date_range("2016-01-01", periods=n, freq="1h", tz="UTC")
+        values = np.clip(
+            2.0
+            - 1.0 * np.cos(2 * np.pi * np.arange(n) / 8766 + np.pi)
+            + rng.gamma(2, 0.25, n)
+            - 0.4,
+            0.1,
+            None,
+        )
+        return pd.Series(values, index=index.as_unit(unit))
+
+    def test_window_statistics_match_nanosecond_reference(self, unit):
+        reference = window_statistics(self._series("ns"), 1.75, 36.8)
+        actual = window_statistics(self._series(unit), 1.75, 36.8)
+        for key, expected in reference.items():
+            if isinstance(expected, float) and np.isnan(expected):
+                assert np.isnan(actual[key]), key
+            else:
+                assert actual[key] == pytest.approx(expected), key
+
+    def test_wait_is_on_a_plausible_scale(self, unit):
+        """Independent of the reference: an absolute sanity bound.
+
+        A site reachable ~40% of the time, needing a 36.8 h window, cannot
+        have a mean wait of a few hours. Reading the unit wrongly gave 0.7 h.
+        """
+        stats = window_statistics(self._series(unit), 1.75, 36.8)
+        assert stats["n_windows"] > 0
+        assert stats["expected_wait_hours"] > 24.0
+
+    def test_downtime_matches_nanosecond_reference(self, unit):
+        site = SiteLogistics(distance_km=70)
+        assert downtime_fraction(self._series(unit), site) == pytest.approx(
+            downtime_fraction(self._series("ns"), site)
+        )
