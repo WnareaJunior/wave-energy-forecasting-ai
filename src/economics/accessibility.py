@@ -216,6 +216,18 @@ def seasonal_accessibility(
         if subset.empty:
             continue
         stats = window_statistics(subset, threshold_m, required_hours)
+
+        # expected_wait_hours is dropped, not reported. Subsetting by month
+        # concatenates the same season across years, so the wait calculation
+        # runs from (say) February straight into the following December and
+        # counts the intervening nine months as waiting. The printed values
+        # exceeded the length of the season itself - 5,307 hours for a 90-day
+        # winter - which is how the flaw was noticed.
+        #
+        # accessible_fraction and the window counts are unaffected: those are
+        # per-timestep and per-run quantities, and find_windows already breaks
+        # a run wherever the index skips.
+        stats.pop("expected_wait_hours", None)
         stats["season"] = label
         rows.append(stats)
 

@@ -165,6 +165,7 @@ def annual_om_cost(
     hs: pd.Series,
     site: SiteLogistics,
     forecast_rmse_m: float = 0.0,
+    operations=None,
 ) -> dict:
     """Recurring vessel cost per year.
 
@@ -190,10 +191,16 @@ def annual_om_cost(
             values add the cost of sailings that abort because the forecast was
             wrong - the one place forecast skill carries a dollar value.
     """
+    # Taken as a parameter rather than read from the module global: a caller
+    # rebinding src.economics.deployment.ANNUAL_OPERATIONS cannot affect the
+    # name this module bound at import time. A sensitivity analysis that tried
+    # exactly that silently produced baseline numbers for every scenario.
+    operations = ANNUAL_OPERATIONS if operations is None else operations
+
     rows = []
     seen_vessels = set()
 
-    for operation in ANNUAL_OPERATIONS:
+    for operation in operations:
         required = window_hours_required(operation, site.distance_km)
         stats = window_statistics(hs, operation.vessel.max_hs_operate_m, required)
         wait = stats["expected_wait_hours"]
@@ -250,7 +257,9 @@ def campaign_cost(hs: pd.Series, site: SiteLogistics, operations) -> float:
     return total
 
 
-def downtime_fraction(hs: pd.Series, site: SiteLogistics) -> float:
+def downtime_fraction(
+    hs: pd.Series, site: SiteLogistics, operations=None
+) -> float:
     """Share of the year the device is expected to be down awaiting repair.
 
     A failure does not end when a vessel is dispatched; it ends when the
@@ -259,7 +268,8 @@ def downtime_fraction(hs: pd.Series, site: SiteLogistics) -> float:
     quantity that depends entirely on the local wave climate and the distance
     to port, and that a resource-only ranking ignores completely.
     """
-    unscheduled = [op for op in ANNUAL_OPERATIONS if "Unscheduled" in op.name]
+    operations = ANNUAL_OPERATIONS if operations is None else operations
+    unscheduled = [op for op in operations if "Unscheduled" in op.name]
     if not unscheduled:
         return 0.0
 
@@ -280,6 +290,8 @@ def evaluate_site(
     site: SiteLogistics,
     device: DeviceSpec | None = None,
     market: MarketSpec | None = None,
+    operations=None,
+    forecast_rmse_m: float = 0.0,
 ) -> dict:
     """Full economic assessment of one candidate site.
 
@@ -293,13 +305,13 @@ def evaluate_site(
     market = market or MarketSpec()
 
     energy = annual_energy_mwh(power_flux_w_per_m, device, hs)
-    downtime = downtime_fraction(hs, site)
+    downtime = downtime_fraction(hs, site, operations)
     delivered_mwh = energy["annual_energy_mwh"] * (1.0 - downtime)
 
     gross = energy["annual_energy_mwh"] * market.energy_price_usd_per_mwh
     delivered = delivered_mwh * market.energy_price_usd_per_mwh
 
-    om = annual_om_cost(hs, site)
+    om = annual_om_cost(hs, site, forecast_rmse_m, operations)
     deploy = campaign_cost(hs, site, DEPLOYMENT_OPERATIONS)
     retrieve = campaign_cost(hs, site, RETRIEVAL_OPERATIONS)
     moorings = mooring_capex(site)

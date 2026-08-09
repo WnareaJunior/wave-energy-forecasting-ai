@@ -238,7 +238,17 @@ def operation_cost(
     }
 
 
-def false_start_multiplier(forecast_rmse_m: float, threshold_m: float) -> float:
+#: Wave-height margin an operator keeps below the working limit when deciding
+#: to sail. A fixed margin, not one scaled to forecast error - the operator
+#: does not know the forecast's RMSE, they apply a habitual buffer.
+DEFAULT_SAIL_MARGIN_M = 0.3
+
+
+def false_start_multiplier(
+    forecast_rmse_m: float,
+    threshold_m: float,
+    margin_m: float = DEFAULT_SAIL_MARGIN_M,
+) -> float:
     """Cost inflation from mobilising against an imperfect forecast.
 
     This is where forecast quality enters the economics, and it is the only
@@ -258,21 +268,25 @@ def false_start_multiplier(forecast_rmse_m: float, threshold_m: float) -> float:
         forecast_rmse_m: Forecast RMSE at the relevant lead time, metres. GEFS
             measures 0.41 m at +24 h at NDBC 46041.
         threshold_m: The vessel's working limit.
+        margin_m: How far below the limit the operator aims.
 
     Returns:
         Multiplier on vessel cost, at least 1.0.
+
+    Note:
+        An earlier version set the margin equal to the RMSE, which made the
+        RMSE cancel out of ``z = margin / (rmse * sqrt(2))`` - the multiplier
+        came out at 1.19 for every forecast quality from 0.2 m to 1.0 m. It was
+        only visible once the table was printed with several RMSE values side
+        by side and every row was identical.
     """
     from math import erf, sqrt
 
     if forecast_rmse_m <= 0:
         return 1.0
 
-    # Operators do not sail at the limit; they keep a margin. Assume they aim
-    # one RMSE below it, so the abort probability is P(error > 1 RMSE).
-    margin = forecast_rmse_m
-    z = margin / (forecast_rmse_m * sqrt(2.0))
-    p_abort = 0.5 * (1.0 - erf(z))
-    p_abort = min(p_abort, 0.9)
+    z = margin_m / (forecast_rmse_m * sqrt(2.0))
+    p_abort = min(0.5 * (1.0 - erf(z)), 0.9)
     return 1.0 / (1.0 - p_abort)
 
 

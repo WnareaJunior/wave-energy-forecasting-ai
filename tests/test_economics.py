@@ -174,6 +174,19 @@ class TestAccessibility:
             < table.loc["summer (JJA)", "accessible_fraction"]
         )
 
+    def test_seasonal_output_omits_the_meaningless_wait(self):
+        """Subsetting by month makes expected_wait_hours nonsense.
+
+        The same season across years is concatenated, so the wait runs from
+        February into the following December and counts nine months of summer
+        as waiting. Real output showed 5,307 hours for a 90-day winter. The
+        column is dropped rather than reported wrong.
+        """
+        table = seasonal_accessibility(make_hs(), 2.0, 24)
+        assert "expected_wait_hours" not in table.columns
+        assert "accessible_fraction" in table.columns
+        assert "windows_per_year" in table.columns
+
 
 class TestEnergy:
     def test_rated_power_clips_output(self):
@@ -281,6 +294,68 @@ class TestForecastValue:
         perfect = annual_om_cost(hs, site, forecast_rmse_m=0.0)
         gefs = annual_om_cost(hs, site, forecast_rmse_m=0.41)
         assert gefs["total_annual_usd"] > perfect["total_annual_usd"]
+
+    def test_multiplier_actually_varies_with_rmse(self):
+        """Regression: it used to be constant.
+
+        The margin was set equal to the RMSE, so the RMSE cancelled out of
+        z = margin / (rmse * sqrt(2)) and every forecast quality returned
+        1.19. Only visible once several RMSE values were printed side by side
+        and every row was identical.
+        """
+        values = [false_start_multiplier(r, 1.75) for r in (0.2, 0.41, 0.6, 1.0)]
+        assert len(set(round(v, 4) for v in values)) == len(values)
+        assert values == sorted(values), "a worse forecast must cost more"
+        assert values[-1] > values[0] * 1.2
+
+
+class TestSensitivityPlumbing:
+    """Operations must be passable, not patched onto a module global."""
+
+    def test_scaled_day_rates_change_the_cost(self):
+        from dataclasses import replace
+
+        import src.economics.deployment as dep
+
+        hs = make_hs()
+        site = SiteLogistics(distance_km=80)
+        dearer = tuple(
+            replace(op, vessel=replace(op.vessel, day_rate_usd=op.vessel.day_rate_usd * 2))
+            for op in dep.ANNUAL_OPERATIONS
+        )
+        base = annual_om_cost(hs, site)["total_annual_usd"]
+        scaled = annual_om_cost(hs, site, operations=dearer)["total_annual_usd"]
+        assert scaled > base * 1.5
+
+    def test_failure_rate_changes_downtime(self):
+        from dataclasses import replace
+
+        import src.economics.deployment as dep
+
+        hs = make_hs()
+        site = SiteLogistics(distance_km=80)
+        frequent = tuple(
+            replace(op, per_year=op.per_year * 3 if "Unscheduled" in op.name else op.per_year)
+            for op in dep.ANNUAL_OPERATIONS
+        )
+        assert downtime_fraction(hs, site, frequent) > downtime_fraction(hs, site)
+
+    def test_evaluate_site_threads_operations_through(self):
+        """The bug: rebinding the module global left every scenario identical."""
+        from dataclasses import replace
+
+        import src.economics.deployment as dep
+
+        hs = make_hs()
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=80)
+        dearer = tuple(
+            replace(op, vessel=replace(op.vessel, day_rate_usd=op.vessel.day_rate_usd * 3))
+            for op in dep.ANNUAL_OPERATIONS
+        )
+        base = evaluate_site(hs, flux, site)["net_annual_usd"]
+        scaled = evaluate_site(hs, flux, site, operations=dearer)["net_annual_usd"]
+        assert scaled < base
 
     def test_downtime_rises_with_distance(self):
         hs = make_hs()
