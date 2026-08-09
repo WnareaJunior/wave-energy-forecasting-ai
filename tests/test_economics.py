@@ -109,6 +109,23 @@ class TestFindWindows:
         empty = pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
         assert find_windows(empty, 1.5, 6).empty
 
+    def test_works_on_a_read_only_backed_series(self):
+        """Regression: pandas 3 copy-on-write returns read-only arrays.
+
+        `(hs <= threshold).to_numpy()` hands back a read-only view under
+        pandas 3, so the in-place `&=` that follows raised "output array is
+        read-only". It passed locally on pandas 2.3 and failed in CI on 3.0 -
+        the notebook run was the first thing to catch it.
+        """
+        values = np.full(200, 1.0)
+        values[50:100] = 3.0
+        values.flags.writeable = False
+        index = pd.date_range("2016-01-01", periods=200, freq="1h", tz="UTC")
+        hs = pd.Series(values, index=index)
+
+        windows = find_windows(hs, threshold_m=1.5, min_hours=10)
+        assert not windows.empty
+
 
 class TestAccessibility:
     def test_fraction_below_threshold(self):

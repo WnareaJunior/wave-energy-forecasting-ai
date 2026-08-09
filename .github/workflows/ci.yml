@@ -12,8 +12,24 @@ permissions:
 
 jobs:
   test:
-    name: Lint and test
+    # Two dependency sets, because they resolve to genuinely different
+    # libraries and the difference has already bitten.
+    #
+    #   pinned - requirements.txt, currently pandas 2.3 / numpy 2.3
+    #   loose  - requirements-pilot.txt, which resolves to the newest release,
+    #            currently pandas 3.0 / numpy 2.4
+    #
+    # pandas 3 enables copy-on-write, so `.to_numpy()` returns a read-only
+    # array. Code that mutated one in place passed every local test on the
+    # pinned set and crashed in CI on the loose set. Testing only the pinned
+    # versions means testing something nobody actually runs.
+    name: Lint and test (${{ matrix.dependencies }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dependencies: [pinned, loose]
+
     steps:
       - uses: actions/checkout@v4
 
@@ -24,14 +40,26 @@ jobs:
           cache-dependency-path: |
             requirements.txt
             requirements-dev.txt
+            requirements-pilot.txt
 
-      - name: Install dependencies
-        # Installing the full requirements set is deliberate: it is what catches
-        # an unparseable or unresolvable requirements.txt before it reaches a
+      - name: Install dependencies (pinned)
+        if: matrix.dependencies == 'pinned'
+        # Installing the full pinned set is deliberate: it is what catches an
+        # unparseable or unresolvable requirements.txt before it reaches a
         # deployment target.
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+
+      - name: Install dependencies (loose)
+        if: matrix.dependencies == 'loose'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-pilot.txt
+          pip install pytest pytest-cov ruff xarray netCDF4 matplotlib nbformat
+
+      - name: Show resolved versions
+        run: pip list | grep -Ei "^(numpy|pandas|scikit-learn|xarray|lightgbm) "
 
       - name: Lint
         run: ruff check .

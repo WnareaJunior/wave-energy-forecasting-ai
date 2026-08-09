@@ -65,7 +65,11 @@ def find_windows(
 
     index = hs.index
     step_hours = _median_step_hours(index)
-    workable = (hs <= threshold_m).to_numpy()
+    # copy=True is required, not defensive: under pandas 3's copy-on-write,
+    # `.to_numpy()` hands back a read-only view and the in-place `&=` below
+    # raises "output array is read-only". Local runs on pandas 2.3 did not,
+    # which is why this reached CI.
+    workable = (hs <= threshold_m).to_numpy(copy=True)
     workable &= hs.notna().to_numpy()
 
     # A run breaks either when conditions exceed the limit or when the index
