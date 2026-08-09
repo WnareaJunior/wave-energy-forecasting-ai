@@ -42,6 +42,7 @@ def run_horizon(
     gap_hours: int = 72,
     storm_percentile: float = 90,
     reference_factory=None,
+    required_columns=None,
 ) -> list[dict]:
     """Fit and score every model at a single lead time.
 
@@ -60,11 +61,16 @@ def run_horizon(
             experiment pass ``RawNWPForecaster`` instead - beating the physics
             model is the claim that matters there, and persistence would be
             flattering.
+        required_columns: Feature columns that must be present for a row to be
+            usable. For a postprocessing run this must include the NWP column:
+            otherwise rows with no forecast survive, the reference model
+            predicts NaN on them, and it is scored on a different sample than
+            the models it is being compared against.
 
     Returns:
         One metric dict per model.
     """
-    X, y = make_supervised(features, target, horizon)
+    X, y = make_supervised(features, target, horizon, required_columns=required_columns)
 
     train_index = X.index.intersection(split.train)
     val_index = X.index.intersection(split.validation)
@@ -127,6 +133,7 @@ def run_backtest(
     gap_hours: int = 72,
     storm_percentile: float = 90,
     reference_factory=None,
+    required_columns=None,
 ) -> pd.DataFrame:
     """Run :func:`run_horizon` across all lead times.
 
@@ -139,7 +146,7 @@ def run_backtest(
         records.extend(
             run_horizon(
                 features, target, horizon, model_factories, split,
-                gap_hours, storm_percentile, reference_factory,
+                gap_hours, storm_percentile, reference_factory, required_columns,
             )
         )
     return results_table(records)
@@ -156,6 +163,7 @@ def run_rolling_backtest(
     val_fraction: float = 0.15,
     storm_percentile: float = 90,
     reference_factory=None,
+    required_columns=None,
 ) -> pd.DataFrame:
     """Score every model across several consecutive test windows.
 
@@ -210,7 +218,7 @@ def run_rolling_backtest(
         for horizon in horizons:
             fold_records = run_horizon(
                 features, target, horizon, factories, split,
-                gap_hours, storm_percentile, reference_factory,
+                gap_hours, storm_percentile, reference_factory, required_columns,
             )
             for record in fold_records:
                 record["fold"] = fold

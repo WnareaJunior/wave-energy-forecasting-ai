@@ -1,0 +1,294 @@
+"""Track B: can a statistical model improve on the physics forecast?
+
+The buoy pilot answered "is there skill in the buoy's own history" - yes, about
+20% over the best baseline, peaking at +24 h and exhausted by +72 h. This asks
+the harder and more useful question: given WAVEWATCH III's forecast for a
+Washington-coast buoy, can a model learn its site-specific errors and beat it?
+
+That is where ML reliably earns its place in operational forecasting. Not by
+replacing the physics, but by correcting it.
+
+The comparison
+--------------
+Skill is scored against **the raw GEFS forecast**, not persistence. Two
+deliberately awkward baselines sit alongside it:
+
+  ``raw_nwp``       the physics forecast, untouched - the reference
+  ``nwp_debiased``  the forecast minus its mean training error
+
+The second matters. Much of what a gradient-boosted postprocessor achieves is
+often just the removal of a constant offset, and without this baseline a
+complex model takes the credit for it.
+
+Data
+----
+Truth is the NDBC record. The forecast is the GEFSv12 reforecast point output.
+Their overlap is 2015-2019, and cycles are daily, so at a fixed lead time there
+is roughly one sample per day - about 1,800 per horizon at stride 1.
+
+Usage::
+
+    python experiments/track_b_postprocess.py --stations 46041 --stride 3
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.config import NDBC_STATIONS, NOAA_LAST_YEAR  # noqa: E402
+from src.data.gefs import (  # noqa: E402
+    align_forecast_to_issue_time,
+    build_forecast_dataset,
+    daily_dates,
+)
+from src.data.ndbc import load_station  # noqa: E402
+from src.eval.backtest import (  # noqa: E402
+    aggregate_folds,
+    format_mean_std,
+    run_rolling_backtest,
+)
+from src.eval.metrics import bias, rmse  # noqa: E402
+from src.features.build import build_feature_frame  # noqa: E402
+from src.models.baselines import (  # noqa: E402
+    BiasCorrectedNWPForecaster,
+    ClimatologyForecaster,
+    PersistenceForecaster,
+    RawNWPForecaster,
+)
+from src.models.linear import RidgeForecaster  # noqa: E402
+
+logger = logging.getLogger("track_b")
+
+DEFAULT_HORIZONS = (6, 12, 24, 48, 72)
+
+#: Both must be present for a row to be usable: the buoy value at issue time,
+#: so persistence can forecast, and the NWP value, so the reference can. Without
+#: the second, rows with no forecast survive and raw_nwp is scored on a
+#: different sample than the models it is compared against.
+REQUIRED_COLUMNS = ["WVHT", "nwp_wvht"]
+
+
+def build_factories(seed: int = 0) -> dict:
+    factories = {
+        "persistence": PersistenceForecaster,
+        "climatology": ClimatologyForecaster,
+        "raw_nwp": RawNWPForecaster,
+        "nwp_debiased": BiasCorrectedNWPForecaster,
+        "ridge_postproc": lambda: RidgeForecaster(alpha=1.0),
+    }
+    try:
+        from src.models.trees import LightGBMForecaster
+
+        factories["lgbm_postproc"] = lambda: LightGBMForecaster(seed=seed)
+    except ImportError:
+        logger.warning("lightgbm not installed - skipping that rung")
+    return factories
+
+
+def report_raw_forecast_error(observations, forecasts, station, horizons) -> None:
+    """Characterise the physics model's error before trying to correct it.
+
+    If the raw forecast has little systematic bias there is less for a
+    postprocessor to remove, and that is worth knowing before reading any
+    skill number.
+    """
+    print("\n" + "=" * 78)
+    print(f"RAW GEFS ERROR AT {station}, BEFORE ANY CORRECTION")
+    print("=" * 78)
+    print(f"{'lead':>6}  {'n':>6}  {'RMSE':>7}  {'bias':>7}")
+
+    truth = observations["WVHT"]
+    for horizon in horizons:
+        forecast = forecasts[forecasts["lead_hours"] == horizon].set_index("valid_time")
+        if forecast.empty:
+            continue
+        joined = pd.DataFrame({"nwp": forecast["hs"]}).join(
+            truth.rename("obs"), how="inner"
+        ).dropna()
+        if joined.empty:
+            continue
+        print(
+            f"{horizon:>5}h  {len(joined):>6}  "
+            f"{rmse(joined['obs'], joined['nwp']):>7.3f}  "
+            f"{bias(joined['obs'], joined['nwp']):>+7.3f}"
+        )
+
+
+def run_station(station: str, args) -> pd.DataFrame:
+    """Build the paired dataset for one station and run the comparison."""
+    info = NDBC_STATIONS[station]
+    logger.info("Station %s (%s)", station, info.name)
+
+    start_year, end_year = (int(y) for y in args.years.split("-"))
+    if end_year > NOAA_LAST_YEAR:
+        logger.warning(
+            "Reforecast ends in %d; clipping the requested window", NOAA_LAST_YEAR
+        )
+        end_year = NOAA_LAST_YEAR
+
+    logger.info("Loading NDBC observations %d-%d", start_year, end_year)
+    observations = load_station(
+        station, list(range(start_year, end_year + 1)), cache_dir=args.cache_dir
+    )
+
+    dates = daily_dates(f"{start_year}-01-01", f"{end_year}-12-31", args.stride)
+    logger.info(
+        "Extracting %d GEFS cycles (member %s, stride %d)",
+        len(dates), args.member, args.stride,
+    )
+    forecasts = build_forecast_dataset(
+        dates, [station], member=args.member, workers=args.workers
+    )
+    if forecasts.empty:
+        raise RuntimeError(f"No GEFS cycles could be read for {station}")
+
+    horizons = [int(h) for h in args.horizons.split(",")]
+    report_raw_forecast_error(observations, forecasts, station, horizons)
+
+    features = build_feature_frame(observations)
+    target = observations["WVHT"]
+
+    records = []
+    for horizon in horizons:
+        at_valid = (
+            forecasts[forecasts["lead_hours"] == horizon]
+            .set_index("valid_time")["hs"]
+            .sort_index()
+        )
+        horizon_features = features.assign(
+            nwp_wvht=align_forecast_to_issue_time(at_valid, horizon, features.index)
+        )
+
+        usable = horizon_features["nwp_wvht"].notna().sum()
+        logger.info("Horizon %sh: %d rows carry a forecast", horizon, usable)
+        if usable < args.min_samples:
+            logger.warning(
+                "Horizon %sh: only %d paired rows, below --min-samples %d, skipping",
+                horizon, usable, args.min_samples,
+            )
+            continue
+
+        fold_records = run_rolling_backtest(
+            horizon_features,
+            target,
+            [horizon],
+            build_factories,
+            n_splits=args.n_splits,
+            test_size_days=args.test_size_days,
+            reference_factory=RawNWPForecaster,
+            required_columns=REQUIRED_COLUMNS,
+        )
+        records.append(fold_records)
+
+    if not records:
+        raise RuntimeError(f"No horizon produced results for {station}")
+
+    combined = pd.concat(records, ignore_index=True)
+    combined["station"] = station
+    return combined
+
+
+def report(station: str, records: pd.DataFrame) -> None:
+    info = NDBC_STATIONS[station]
+    print("\n" + "=" * 78)
+    print(f"TRACK B: NDBC {station} ({info.name})   [vs raw GEFS, mean ± std]")
+    print("=" * 78)
+
+    print("\nRMSE by horizon (metres, lower is better)")
+    print(format_mean_std(records, "rmse").to_string())
+
+    print("\nSkill vs RAW GEFS (fraction of RMSE removed)")
+    print(format_mean_std(records, "skill_vs_reference").to_string())
+
+    print("\nStorm RMSE, top 10% of observed sea states (metres)")
+    print(format_mean_std(records, "rmse_p90").to_string())
+
+    summary = aggregate_folds(records, "rmse")["mean"].unstack("model")
+    if "raw_nwp" not in summary.columns:
+        return
+
+    print("\nDid postprocessing beat the physics model?")
+    for horizon in summary.index:
+        raw = summary.loc[horizon, "raw_nwp"]
+        candidates = [c for c in summary.columns if c != "raw_nwp"]
+        best = summary.loc[horizon, candidates].idxmin()
+        value = summary.loc[horizon, best]
+        gain = 1 - value / raw
+        verdict = "" if gain > 0.02 else "   <- no real gain over raw GEFS"
+        print(
+            f"  +{horizon:>3}h  {best:<16} {value:.3f}  vs  raw_nwp {raw:.3f}   "
+            f"{gain:+.1%}{verdict}"
+        )
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--stations", default="46041")
+    parser.add_argument(
+        "--years",
+        default="2015-2019",
+        help="Overlap of the NDBC records and the reforecast, which ends 2019",
+    )
+    parser.add_argument("--horizons", default=",".join(str(h) for h in DEFAULT_HORIZONS))
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=3,
+        help="Take every Nth cycle. Each cycle is an 8.7 MB download; stride 1 "
+        "over 2015-2019 is ~1,800 files and ~16 GB.",
+    )
+    parser.add_argument("--member", default="c00", help="c00 is the control run")
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--n-splits", type=int, default=3)
+    parser.add_argument("--test-size-days", type=int, default=240)
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=200,
+        help="Skip a horizon with fewer paired rows than this",
+    )
+    parser.add_argument("--cache-dir", default="data/raw/ndbc")
+    parser.add_argument("--output-dir", default="results/track_b")
+    parser.add_argument("--log-level", default="INFO")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=args.log_level, format="%(asctime)s %(levelname)-7s %(message)s"
+    )
+
+    stations = [s.strip() for s in args.stations.split(",") if s.strip()]
+    collected = []
+
+    for station in stations:
+        try:
+            records = run_station(station, args)
+        except Exception as e:
+            logger.error("Station %s failed: %s: %s", station, type(e).__name__, e)
+            continue
+        report(station, records)
+        collected.append(records)
+
+    if not collected:
+        logger.error("No station produced results")
+        return 1
+
+    all_records = pd.concat(collected, ignore_index=True)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"track_b_{'-'.join(stations)}.csv"
+    all_records.to_csv(path, index=False)
+    print(f"\nWritten to {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
