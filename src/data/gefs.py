@@ -211,38 +211,52 @@ def extract_cycle(ds, station_indices: dict[str, int], init: pd.Timestamp) -> pd
     return pd.concat(frames, ignore_index=True)
 
 
-def fetch_cycle(
+def download_cycle(
     s3,
     date: str,
-    station_indices_cache: dict,
-    station_ids,
     member: str = "c00",
     tmp_dir: Path | str = "/tmp/gefs",
-) -> pd.DataFrame | None:
-    """Download one cycle, extract the stations, delete the file.
+) -> Path | None:
+    """Download one cycle file. Safe to call from several threads.
 
-    Deleting immediately is what keeps peak disk flat: the pairing needs a few
-    hundred rows from each 8.7 MB file, and there are thousands of files.
+    Only the network call happens here. Reading the NetCDF does not, and that
+    separation is deliberate - see :func:`build_forecast_dataset`.
 
     Returns:
-        Long DataFrame for this cycle, or None if the cycle is absent (not
-        every calendar day has one) or unreadable.
+        Local path, or None if the cycle does not exist. Not every calendar day
+        has one.
     """
-    import xarray as xr
-
     tmp_dir = Path(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    key = cycle_key(date, member)
     local = tmp_dir / f"{date}.{member}.tab.nc"
 
     try:
-        s3.download_file(NOAA_SOURCE_BUCKET, key, str(local))
+        s3.download_file(NOAA_SOURCE_BUCKET, cycle_key(date, member), str(local))
     except Exception as e:
         logger.debug("No cycle for %s (%s): %s", date, member, type(e).__name__)
+        if local.exists():
+            os.remove(local)
         return None
+    return local
+
+
+def read_cycle(
+    path: Path,
+    date: str,
+    station_indices_cache: dict,
+    station_ids,
+    delete: bool = True,
+) -> pd.DataFrame | None:
+    """Extract the stations from a downloaded cycle, then delete the file.
+
+    Must be called from a single thread. Deleting immediately is what keeps
+    peak disk flat: the pairing needs a few hundred rows out of each 8.7 MB
+    file, and there are hundreds of files.
+    """
+    import xarray as xr
 
     try:
-        with xr.open_dataset(local) as ds:
+        with xr.open_dataset(path) as ds:
             # Station indices are stable across cycles, so resolve once.
             if "indices" not in station_indices_cache:
                 station_indices_cache["indices"] = resolve_station_indices(
@@ -250,11 +264,11 @@ def fetch_cycle(
                 )
             return extract_cycle(ds, station_indices_cache["indices"], cycle_init(date))
     except Exception as e:
-        logger.warning("Failed to read %s: %s: %s", key, type(e).__name__, e)
+        logger.warning("Failed to read %s: %s: %s", path.name, type(e).__name__, e)
         return None
     finally:
-        if local.exists():
-            os.remove(local)
+        if delete and path.exists():
+            os.remove(path)
 
 
 def build_forecast_dataset(
@@ -264,53 +278,68 @@ def build_forecast_dataset(
     workers: int = 8,
     tmp_dir: Path | str = "/tmp/gefs",
     progress_every: int = 50,
+    batch_size: int = 16,
 ) -> pd.DataFrame:
     """Extract many cycles into one long-format table.
+
+    Downloads run in parallel; **reads do not**. netCDF4 is backed by HDF5,
+    which is normally built without thread safety, so opening these files from
+    several threads at once segfaults the interpreter outright - no Python
+    traceback, just exit 139. An earlier version did exactly that and died five
+    seconds into a 609-cycle run.
+
+    Downloading is the slow part at 8.7 MB a file, so parallelising it and
+    reading serially keeps nearly all of the speed. Files are fetched a batch at
+    a time and consumed before the next batch starts, which also bounds peak
+    disk at ``batch_size`` files.
 
     Args:
         dates: yyyymmdd strings.
         station_ids: NDBC ids to extract.
         member: Ensemble member. ``c00`` is the control run.
-        workers: Concurrent downloads. The work is network-bound, so threads
-            help substantially; the extraction itself is trivial.
+        workers: Concurrent downloads.
         tmp_dir: Scratch directory. Files are removed as they are consumed.
         progress_every: Log a progress line every N cycles.
+        batch_size: Cycles downloaded before reading. Peak disk is roughly
+            ``batch_size * 8.7 MB``.
 
     Returns:
-        Long DataFrame across all cycles, or empty if none could be read.
+        Long DataFrame across all cycles.
+
+    Raises:
+        RuntimeError: if no cycle could be read at all.
     """
     s3 = make_client()
     dates = list(dates)
     cache: dict = {}
+    frames = []
+    processed = 0
 
-    # Resolve station indices once, up front, on the first readable cycle. Doing
-    # it inside the thread pool would race, and a failure to match should stop
-    # the run immediately rather than after thousands of downloads.
-    for date in dates[:10]:
-        first = fetch_cycle(s3, date, cache, station_ids, member, tmp_dir)
-        if first is not None:
-            break
-    else:
-        raise RuntimeError(
-            f"Could not read any of the first 10 cycles ({dates[:10]}). "
-            "Check the date range and member."
-        )
+    for start in range(0, len(dates), batch_size):
+        batch = dates[start : start + batch_size]
 
-    frames = [first]
-    remaining = [d for d in dates if d != date]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            paths = list(pool.map(lambda d: download_cycle(s3, d, member, tmp_dir), batch))
 
-    def worker(cycle_date: str):
-        return fetch_cycle(s3, cycle_date, cache, station_ids, member, tmp_dir)
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for i, result in enumerate(pool.map(worker, remaining), start=1):
+        # Serial reads: one HDF5 file open at a time, in this thread only.
+        for date, path in zip(batch, paths, strict=True):
+            if path is None:
+                continue
+            result = read_cycle(path, date, cache, station_ids)
             if result is not None:
                 frames.append(result)
-            if i % progress_every == 0:
-                logger.info(
-                    "%d/%d cycles processed, %d readable",
-                    i, len(remaining), len(frames),
-                )
+
+        processed += len(batch)
+        if processed % progress_every < batch_size:
+            logger.info(
+                "%d/%d cycles processed, %d readable", processed, len(dates), len(frames)
+            )
+
+    if not frames:
+        raise RuntimeError(
+            f"No cycles could be read out of {len(dates)} dates. Check the date "
+            f"range, the member ({member}), and that the bucket is reachable."
+        )
 
     logger.info("Read %d of %d cycles", len(frames), len(dates))
     return pd.concat(frames, ignore_index=True)

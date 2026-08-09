@@ -48,6 +48,10 @@ env:
   YEARS: ${{ inputs.years || '2015-2019' }}
   STRIDE: ${{ inputs.stride || '3' }}
   HORIZONS: ${{ inputs.horizons || '6,12,24,48,72' }}
+  # HDF5's file locking assumes a POSIX-locking filesystem and misbehaves on
+  # some runner mounts. Reads here are single-threaded and single-process, so
+  # the lock buys nothing.
+  HDF5_USE_FILE_LOCKING: "FALSE"
 
 jobs:
   track-b:

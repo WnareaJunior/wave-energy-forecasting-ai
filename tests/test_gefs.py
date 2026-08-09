@@ -206,6 +206,48 @@ class TestDateRange:
         assert len(daily_dates("2015-01-01", "2019-12-31")) == 1826
 
 
+class TestSerialReads:
+    """netCDF4 is backed by HDF5, which is normally built without thread safety.
+
+    Opening these files from several threads at once segfaults the interpreter -
+    no traceback, just exit 139. An earlier version parallelised the reads and
+    died five seconds into a 609-cycle run. These tests pin the structure that
+    prevents it: downloads may be concurrent, reads must not be.
+    """
+
+    def test_download_and_read_are_separate_functions(self):
+        """Reading must not be reachable from inside the download path."""
+        import inspect
+
+        from src.data.gefs import build_forecast_dataset, download_cycle
+
+        source = inspect.getsource(download_cycle)
+        assert "open_dataset" not in source
+        assert "read_cycle" not in source
+
+        # And the pool must only ever be handed the downloader.
+        build_source = inspect.getsource(build_forecast_dataset)
+        pool_line = [
+            line for line in build_source.splitlines() if "pool.map" in line
+        ]
+        assert pool_line, "expected a thread pool in build_forecast_dataset"
+        assert all("download_cycle" in line for line in pool_line)
+        assert all("read_cycle" not in line for line in pool_line)
+
+    def test_reads_happen_outside_the_pool(self):
+        """read_cycle must be called after the pool context has closed."""
+        import inspect
+        import re
+
+        from src.data.gefs import build_forecast_dataset
+
+        source = inspect.getsource(build_forecast_dataset)
+        # The `with ThreadPoolExecutor(...)` block must not contain read_cycle.
+        match = re.search(r"with ThreadPoolExecutor.*?\n(.*?)\n\n", source, re.S)
+        assert match, "expected a ThreadPoolExecutor block"
+        assert "read_cycle" not in match.group(1)
+
+
 class TestForecastAlignment:
     """The one operation that can leak the future into the postprocessing set.
 
