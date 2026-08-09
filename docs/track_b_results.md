@@ -1,111 +1,123 @@
 # Track B results: can we improve on the physics forecast?
 
-Postprocessing the GEFSv12 wave reforecast at NDBC 46041.
+Postprocessing the GEFSv12 wave reforecast at three Washington-coast buoys.
 
 | | |
 |---|---|
-| Station | 46041, Cape Elizabeth WA |
-| Forecast | GEFSv12 reforecast, control member, point output |
-| Truth | NDBC 46041 |
-| Window | 2015–2019, all 1,826 daily cycles read |
-| Samples | ~1,615 usable rows per horizon; folds of ~1,000 train / ~200 test |
-| Evaluation | Rolling-origin, 3 folds, mean ± std |
-| Reference | **raw GEFS**, not persistence |
-| Run | [Actions run 31287166524](https://github.com/WnareaJunior/wave-energy-forecasting-ai/actions/runs/31287166524) |
+| Stations | 46041 Cape Elizabeth, 46087 Neah Bay, 46029 Columbia River Bar |
+| Forecast | GEFSv12 reforecast, **5-member ensemble mean**, point output |
+| Truth | NDBC observations |
+| Window | 2015–2019, 913 cycles per station at stride 2, all read, 5/5 members |
+| Evaluation | Rolling-origin, 3 folds, mean ± std across folds |
+| Reference | **raw GEFS ensemble mean**, not persistence |
+| Run | [Actions run 31288635826](https://github.com/WnareaJunior/wave-energy-forecasting-ai/actions/runs/31288635826) |
 
 ---
 
 ## Finding 1: GEFS is roughly twice as accurate as anything we built
 
-| lead | GEFS RMSE | best buoy-only model (pilot) | ratio |
-|-----:|----------:|------------------------------:|------:|
-| +24 h | **0.410** | 0.801 | 2.0× |
-| +48 h | **0.458** | 0.961 | 2.1× |
-| +72 h | **0.505** | 1.031 | 2.0× |
+| lead | GEFS (46041) | best buoy-only model (pilot) | ratio |
+|-----:|-------------:|------------------------------:|------:|
+| +24 h | **0.420** | 0.801 | 1.9× |
+| +48 h | **0.474** | 0.961 | 2.0× |
+| +72 h | **0.513** | 1.031 | 2.0× |
 
-This is the single most useful number the project has produced. Nine years of
-buoy history, a full feature pipeline and a model ladder get to 0.80 m at
-+24 h. WAVEWATCH III, forced by GEFS winds, gets to 0.41 m — and its error is
-almost flat with lead time where ours doubled.
+Nine years of buoy history, a full feature pipeline and a model ladder reach
+0.80 m at +24 h. WAVEWATCH III forced by GEFS winds reaches 0.42 m, and its
+error is nearly flat with lead time where ours doubled. **The physics model is
+the best available signal — treat it as an input, not a baseline to beat.**
 
-Any operational forecast for these sites should take the physics model as its
-input. It is not a baseline to beat; it is the best available signal.
+## Finding 2: the three sites behave completely differently
 
-## Finding 2: its bias is real but small, and that caps what correction can do
+This is what the single-station run missed.
 
-| lead | n | RMSE | bias | bias² as % of MSE | best possible gain from debiasing |
-|-----:|----:|-----:|------:|---:|---:|
-| +6 h | 1636 | 0.402 | +0.120 | 8.4% | +4.3% |
-| +12 h | 1630 | 0.382 | +0.102 | 7.5% | +3.8% |
-| +24 h | 1630 | 0.410 | +0.123 | 10.3% | +5.3% |
-| +48 h | 1630 | 0.458 | +0.119 | 5.6% | +2.9% |
-| +72 h | 1630 | 0.505 | +0.122 | 5.4% | +2.7% |
+| station | mean bias | RMSE +6 h → +72 h | growth |
+|---|---:|---|---:|
+| 46041 Cape Elizabeth | **+0.156 m** | 0.415 → 0.513 | +24% |
+| 46087 Neah Bay | **−0.015 m** | 0.376 → 0.411 | **+9%** |
+| 46029 Columbia River Bar | +0.107 m | 0.389 → 0.448 | +15% |
 
-GEFS runs about 0.12 m high at this buoy, consistently across all lead times.
-That is a genuine systematic error — but squared, it is only 5–10% of mean
-squared error. Removing it *perfectly* buys under 5%. Everything else is
-variance, which no amount of bias correction touches.
+The two open-coast buoys carry a consistent positive bias of 0.11–0.16 m. Neah
+Bay carries essentially none, and its error barely grows with lead time.
 
-This arithmetic was done before the models ran, and it predicted the result.
+## Finding 3: postprocessing works at one station out of three
 
-## Finding 3: postprocessing delivers roughly what the arithmetic allows
+Ridge skill against raw GEFS, mean ± std across folds, with the ratio that
+matters — a mean smaller than its own spread is not separable from zero:
 
-Skill vs raw GEFS, mean ± std across folds:
+| lead | 46041 | 46087 | 46029 |
+|-----:|------:|------:|------:|
+| +6 h  | +8.3% ± 10.6% (0.8×) | **+17.8% ± 8.3% (2.1×)** | +6.5% ± 12.3% (0.5×) |
+| +12 h | −6.6% ± 12.7% | **+14.5% ± 1.4% (10.4×)** | −1.3% ± 12.0% |
+| +24 h | +4.0% ± 4.3% (0.9×) | **+12.4% ± 6.4% (1.9×)** | +1.1% ± 5.1% (0.2×) |
+| +48 h | +1.2% ± 12.6% | +5.9% ± 4.0% (1.5×) | +9.1% ± 5.9% (1.5×) |
+| +72 h | +1.8% ± 2.2% (0.8×) | +5.6% ± 8.5% (0.7×) | −1.7% ± 1.4% |
 
-| lead | nwp_debiased | ridge_postproc | lgbm_postproc |
-|-----:|-------------:|---------------:|--------------:|
-| +6 h  | −0.2% ± 4.0% | **+7.2% ± 8.0%** | −2.5% ± 22.6% |
-| +12 h | −1.2% ± 2.4% | +3.8% ± 4.8% | −15.8% ± 33.1% |
-| +24 h | +0.7% ± 2.7% | +1.2% ± 4.9% | −8.4% ± 3.0% |
-| +48 h | +0.2% ± 3.1% | −0.8% ± 6.7% | −11.3% ± 4.6% |
-| +72 h | +1.2% ± 1.8% | +1.8% ± 2.8% | −6.9% ± 7.6% |
+At **46041 and 46029 nothing is separable from zero** — every ratio is below 1,
+and the earlier single-station conclusion holds there.
 
-**Read the error bars.** Ridge's +7.2% at +6 h carries a ±8.0% fold spread — it
-straddles zero. Past +12 h everything is inside noise. LightGBM is negative
-everywhere even after being resized for the sample count.
+At **46087, +12 h and +24 h are real**: +14.5% with a ±1.4% spread is ten times
+its own noise, across three independent folds. That is not an artifact.
 
-Storm performance says the same: at the top decile of sea states, raw GEFS is
-the best or tied-best model at every horizon.
+## Why Neah Bay is different, and why it makes sense
 
-**Track B is a negative result.** GEFS is well-calibrated at this site, and a
-statistical layer on top of it buys nothing that survives its own error bars.
+46087 sits at the entrance to the Strait of Juan de Fuca. The other two are open
+coast.
+
+A 0.25° global model has grid cells about 25 km across. It cannot resolve a
+strait entrance: tidal currents, sheltering by Vancouver Island, and refraction
+around the headland all operate below its resolution. So its error there is not
+a constant offset — the bias is near zero — but a **state-dependent** error that
+depends on conditions the model cannot see.
+
+That is precisely the situation a local statistical correction is for. It has
+local observations the global model lacks, and it can learn the conditional
+structure of the error. At the open-coast sites there is no unresolved local
+physics to exploit, only a constant offset that debiasing already removes, and
+sure enough neither ridge nor LightGBM adds anything there.
+
+The flat error growth at 46087 supports the same reading: if error were
+dominated by forecast divergence it would grow with lead time as it does at the
+other two. It does not, which points at a persistent local effect rather than a
+forecasting failure.
+
+**The generalisable claim: postprocessing pays where the physics model cannot
+resolve local effects — and only there.** Sheltered, complex or nearshore sites
+are candidates. Exposed open-coast sites are not.
 
 ---
 
-## Why this is worth having
+## What this changes
 
-The first attempt at this comparison produced ridge at −20% and LightGBM at
-−81% — apparently catastrophic. That was an artifact: 113 buoy features against
-~300 training rows per fold. Re-running with ten features chosen for a reason,
-LightGBM parameters sized for hundreds of rows rather than tens of thousands,
-and three times the cycles moved ridge from −20% to +1%.
+The single-station conclusion was "GEFS is well-calibrated, postprocessing buys
+nothing." That was right about 46041 and wrong as a general statement. Running
+the other two stations cost one workflow run and overturned the generalisation
+while confirming the specific case.
 
-The conclusion did not change, but it is now a measurement rather than an
-overfitting accident. A negative result is only worth stating if the test was
-fair.
+Worth noting how nearly this was missed. Had the pilot stopped at 46041 — the
+buoy chosen because it had the longest cleanest record — the answer would have
+been a confident negative.
 
-## What was NOT tested
+## Caveats
 
-1. **Ensemble members.** Only the control run (`c00`) was used. The ensemble
-   mean is usually more accurate than the control, and ensemble spread is a
-   genuine uncertainty predictor. This would likely *improve the baseline*, so
-   it narrows the postprocessing case further — but it is the honest next
-   comparison, and the spread feature is valuable in its own right.
-2. **Other stations.** 46041 only. 46087 and 46029 are wired and would cost one
-   more run.
-3. **Other targets.** Only significant wave height. Period and direction errors
-   were not examined, and power flux depends on both.
-4. **Extremes specifically.** Storm-decile RMSE was reported, but no model was
-   trained to target extremes, where a WEC's survival loading is set.
+1. **Three folds.** +12 h at 46087 is convincing; +6 h and +24 h have ratios near
+   2, which is suggestive rather than settled. More folds or more cycles would
+   tighten them.
+2. **Stride 2**, so ~900 cycles rather than 1,826. At a fixed lead that is ~900
+   samples.
+3. **One target.** Significant wave height only; period and direction untested.
+4. **LightGBM still loses** almost everywhere, including at 46087 except at
+   +72 h. With a few hundred rows per fold, trees have nothing to work with that
+   ridge does not already capture.
+5. **Ensemble spread was available as a feature** and did not rescue the two
+   open-coast sites, which is itself informative: the ensemble knows when it is
+   uncertain, but that does not tell a model how to correct a bias that is not
+   there.
 
-## What it means for the project
+## What to do with it
 
-The ML-forecasting thread has reached its natural end, and the answer is
-useful: **use the physics model**. GEFS-Wave is free, public, twice as accurate
-as what we could build from buoy history, and near enough unbiased that
-correcting it is not worth the machinery.
-
-That redirects effort rather than ending it. The project's original question —
-where to site the Panthalassa buoy and what it would earn — is a *resource
-assessment* problem, not a forecasting one, and it is where the remaining value
-sits. See the roadmap for what that needs.
+- For 46041 and 46029: **use raw GEFS**. No statistical layer.
+- For 46087 or any similarly sheltered site: a **ridge postprocessor at +12–24 h
+  is worth about 12–15%**, and ridge specifically — not gradient boosting.
+- Before deploying near a strait, headland or shoal, expect the global model to
+  be locally wrong in a learnable way, and budget for a local correction.

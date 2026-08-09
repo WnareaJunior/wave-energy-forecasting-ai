@@ -293,6 +293,11 @@ def report(station: str, records: pd.DataFrame) -> None:
     if "raw_nwp" not in summary.columns:
         return
 
+    # Report the fold spread alongside the gain. Several of these means are
+    # smaller than their own standard deviation across folds, which makes them
+    # indistinguishable from zero - and a bare percentage hides that.
+    spread = aggregate_folds(records, "skill_vs_reference")
+
     print("\nDid postprocessing beat the physics model?")
     for horizon in summary.index:
         raw = summary.loc[horizon, "raw_nwp"]
@@ -300,7 +305,22 @@ def report(station: str, records: pd.DataFrame) -> None:
         best = summary.loc[horizon, candidates].idxmin()
         value = summary.loc[horizon, best]
         gain = 1 - value / raw
-        verdict = "" if gain > 0.02 else "   <- no real gain over raw GEFS"
+
+        if gain <= 0:
+            print(f"  +{horizon:>3}h  nothing beat raw GEFS ({raw:.3f})")
+            continue
+
+        try:
+            std = spread.loc[(horizon, best), "std"]
+        except KeyError:
+            std = float("nan")
+
+        if pd.notna(std) and std > 0 and abs(gain) < 2 * std:
+            verdict = f"   <- within fold spread (+/-{std:.1%}), not separable from zero"
+        elif gain < 0.02:
+            verdict = "   <- under 2%, not worth the machinery"
+        else:
+            verdict = ""
         print(
             f"  +{horizon:>3}h  {best:<16} {value:.3f}  vs  raw_nwp {raw:.3f}   "
             f"{gain:+.1%}{verdict}"
