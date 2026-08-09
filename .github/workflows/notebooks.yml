@@ -64,7 +64,9 @@ jobs:
       # same way and can report which cell failed with its source. Every
       # notebook is attempted even after one fails.
       - name: Execute
-        run: python scripts/execute_notebooks.py --output-dir executed --timeout 1200
+        run: |
+          python scripts/execute_notebooks.py \
+            --output-dir executed --timeout 1200 --print-outputs
 
       - name: Upload executed notebooks
         if: always()

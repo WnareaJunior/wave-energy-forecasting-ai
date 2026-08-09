@@ -81,11 +81,60 @@ def _describe_failure(notebook, error) -> str:
     return "\n".join(lines)
 
 
+def print_outputs(path: Path, max_chars: int = 6000) -> None:
+    """Dump a notebook's cell outputs to stdout.
+
+    Executed notebooks are uploaded as artifacts, but artifact storage lives on
+    a host that some egress policies block - including the one this project is
+    developed under, where every download route redirects to a denied domain.
+    The job log is readable in that situation and the artifact is not, so the
+    numbers are printed here as well as stored.
+
+    Images are skipped; only text output is useful in a log.
+    """
+    import nbformat
+
+    notebook = nbformat.read(path, as_version=4)
+
+    print("\n" + "#" * 78)
+    print(f"# OUTPUTS: {path.name}")
+    print("#" * 78)
+
+    for i, cell in enumerate(notebook.cells):
+        if cell.get("cell_type") != "code":
+            continue
+
+        chunks = []
+        for output in cell.get("outputs", []):
+            kind = output.get("output_type")
+            if kind == "stream":
+                chunks.append("".join(output.get("text", [])))
+            elif kind == "execute_result":
+                chunks.append("".join(output.get("data", {}).get("text/plain", [])))
+            elif kind == "error":
+                chunks.append("\n".join(output.get("traceback", [])))
+
+        text = "".join(chunks).strip()
+        if not text:
+            continue
+
+        print(f"\n----- cell {i} -----")
+        print(text[:max_chars])
+        if len(text) > max_chars:
+            print(f"... [{len(text) - max_chars} more characters truncated]")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--notebook-dir", default="notebooks")
     parser.add_argument("--output-dir", default="executed")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--print-outputs",
+        action="store_true",
+        help="Also print each notebook's cell outputs to stdout, so the "
+        "results are readable from a job log when artifact storage is blocked.",
+    )
     args = parser.parse_args(argv)
 
     notebook_dir = Path(args.notebook_dir)
@@ -112,7 +161,13 @@ def main(argv=None) -> int:
             # broken cell does not hide the state of the others.
             print(f"FAIL {path.name}\n{message}\n", flush=True)
 
-    print("=" * 78)
+    if args.print_outputs:
+        for path in notebooks:
+            executed = output_dir / path.name
+            if executed.exists():
+                print_outputs(executed)
+
+    print("\n" + "=" * 78)
     print("SUMMARY")
     print("=" * 78)
     for name, ok in results:
