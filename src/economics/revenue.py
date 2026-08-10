@@ -26,6 +26,7 @@ import pandas as pd
 from src.economics.accessibility import window_statistics
 from src.economics.deployment import (
     ANNUAL_OPERATIONS,
+    scale_operations,
     DEFAULT_STANDBY_CAP_HOURS,
     DEPLOYMENT_OPERATIONS,
     RETRIEVAL_OPERATIONS,
@@ -280,7 +281,12 @@ def annual_om_cost(
 
 
 def campaign_cost(hs: pd.Series, site: SiteLogistics, operations) -> float:
-    """One-off cost of a deployment or retrieval campaign, with standby."""
+    """One-off cost of a deployment or retrieval campaign, with standby.
+
+    ``per_year`` is read as a trip count here, not an annual rate, so an array
+    that needs one tow-out per device is charged for each of them. Mobilisation
+    is still charged once per vessel, which is where an array saves.
+    """
     total = 0.0
     seen_vessels = set()
     for operation in operations:
@@ -291,9 +297,10 @@ def campaign_cost(hs: pd.Series, site: SiteLogistics, operations) -> float:
         wait = DEFAULT_STANDBY_CAP_HOURS if unservicable else wait
         first_of_vessel = operation.vessel.name not in seen_vessels
         seen_vessels.add(operation.vessel.name)
-        total += operation_cost(
+        cost = operation_cost(
             operation, distance, wait, include_mobilisation=first_of_vessel
-        )["total_usd"]
+        )
+        total += cost["vessel_cost_usd"] * operation.per_year + cost["mobilisation_usd"]
     return total
 
 
@@ -335,31 +342,56 @@ def evaluate_site(
     market: MarketSpec | None = None,
     operations=None,
     forecast_rmse_m: float = 0.0,
+    n_devices: int = 1,
 ) -> dict:
     """Full economic assessment of one candidate site.
 
+    Args:
+        n_devices: Devices in the array. Costs that are shared across an array
+            are shared here: mobilisation is charged per campaign rather than
+            per device, and campaign operations service several devices per
+            sailing. Costs that are not shared are not: breakdowns scale with
+            the device count, as do device capex, moorings and tow-out.
+
     Returns:
         dict of resource, access, cost and net-revenue quantities. The headline
-        is ``net_annual_usd``; ``gross_annual_usd`` is what a resource-only
-        study would have reported, and the gap between them is the point of
-        this module.
+        is ``net_annual_usd`` for the whole array, with ``net_per_device_usd``
+        alongside it; ``gross_annual_usd`` is what a resource-only study would
+        have reported, and the gap between them is the point of this module.
     """
     device = device or DeviceSpec()
     market = market or MarketSpec()
 
-    energy = annual_energy_mwh(power_flux_w_per_m, device, hs)
-    downtime = downtime_fraction(hs, site, operations)
-    delivered_mwh = energy["annual_energy_mwh"] * (1.0 - downtime)
+    base_operations = ANNUAL_OPERATIONS if operations is None else operations
+    fleet_operations = scale_operations(base_operations, n_devices)
 
-    gross = energy["annual_energy_mwh"] * market.energy_price_usd_per_mwh
+    energy = annual_energy_mwh(power_flux_w_per_m, device, hs)
+    array_energy_mwh = energy["annual_energy_mwh"] * n_devices
+
+    # Downtime is a *per-device* quantity and uses the unscaled operations: one
+    # device's expected outage does not depend on how many neighbours it has.
+    # Scaling the failure rate here instead would multiply each device's own
+    # downtime by the size of the array. (Vessel contention between
+    # simultaneous failures is not modelled.)
+    downtime = downtime_fraction(hs, site, base_operations)
+    delivered_mwh = array_energy_mwh * (1.0 - downtime)
+
+    gross = array_energy_mwh * market.energy_price_usd_per_mwh
     delivered = delivered_mwh * market.energy_price_usd_per_mwh
 
-    om = annual_om_cost(hs, site, forecast_rmse_m, operations)
-    deploy = campaign_cost(hs, site, DEPLOYMENT_OPERATIONS)
-    retrieve = campaign_cost(hs, site, RETRIEVAL_OPERATIONS)
-    moorings = mooring_capex(site)
+    om = annual_om_cost(hs, site, forecast_rmse_m, fleet_operations)
+    # One tow-out per device: you move a 61 m spar one at a time, so these
+    # scale in trips rather than in on-site hours. Mobilisation is still
+    # charged once.
+    deploy = campaign_cost(
+        hs, site, scale_operations(DEPLOYMENT_OPERATIONS, n_devices, 1)
+    )
+    retrieve = campaign_cost(
+        hs, site, scale_operations(RETRIEVAL_OPERATIONS, n_devices, 1)
+    )
+    moorings = mooring_capex(site) * n_devices
 
-    capex_total = device.capex_usd + moorings + deploy
+    capex_total = device.capex_usd * n_devices + moorings + deploy
     annualised_capex = (
         capex_total / device.design_life_years
         + retrieve / device.design_life_years
@@ -368,19 +400,22 @@ def evaluate_site(
     # The tow-out distance and the service distance are different numbers and
     # answer different questions: the first sets capex, the second sets O&M and
     # downtime. Reporting only the first is what made Neah Bay look unservicable.
-    service_vessels = {op.vessel for op in (operations or ANNUAL_OPERATIONS)}
+    service_vessels = {op.vessel for op in base_operations}
     service_distance = (
         max(site.distance_for(v) for v in service_vessels)
         if service_vessels
         else site.distance_km
     )
 
+    net = delivered - om["total_annual_usd"] - annualised_capex
+
     return {
+        "n_devices": n_devices,
         "distance_km": site.distance_km,
         "service_distance_km": service_distance,
         "port_name": site.port_name,
         "mean_flux_kw_per_m": float(power_flux_w_per_m.mean() / 1000.0),
-        "annual_energy_mwh": energy["annual_energy_mwh"],
+        "annual_energy_mwh": array_energy_mwh,
         "capacity_factor": energy["capacity_factor"],
         "clipped_fraction": energy["clipped_fraction"],
         "survival_fraction": energy["survival_fraction"],
@@ -389,7 +424,9 @@ def evaluate_site(
         "delivered_annual_usd": delivered,
         "om_annual_usd": om["total_annual_usd"],
         "annualised_capex_usd": annualised_capex,
-        "net_annual_usd": delivered - om["total_annual_usd"] - annualised_capex,
+        "net_annual_usd": net,
+        "net_per_device_usd": net / n_devices,
+        "om_per_device_usd": om["total_annual_usd"] / n_devices,
         "deployment_campaign_usd": deploy,
         "retrieval_campaign_usd": retrieve,
         "mooring_capex_usd": moorings,

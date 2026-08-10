@@ -123,6 +123,13 @@ class Operation:
             operations expected less often than annually.
         contingency: Multiplier on the total window requirement, covering
             set-up, standby and the fact that marine jobs overrun.
+        per_device: Whether the operation is triggered *by a device* rather
+            than run as a campaign. A breakdown is per-device: ten devices
+            break ten times as often, each needing its own sailing. An
+            inspection is a campaign: one sailing visits several devices. The
+            distinction is what decides whether an array shares a cost or
+            multiplies it, and it is the whole reason array scaling is not
+            simply "multiply everything by N".
     """
 
     name: str
@@ -130,6 +137,7 @@ class Operation:
     on_site_hours: float
     per_year: float = 1.0
     contingency: float = 1.3
+    per_device: bool = False
 
 
 #: Tow-out, mooring hookup and commissioning of the buoy. Assumes moorings are
@@ -153,8 +161,75 @@ RETRIEVAL_OPERATIONS = (
 ANNUAL_OPERATIONS = (
     Operation("Scheduled inspection", CTV, on_site_hours=6, per_year=4.0),
     Operation("Planned maintenance", MULTICAT, on_site_hours=16, per_year=1.0),
-    Operation("Unscheduled intervention", MULTICAT, on_site_hours=20, per_year=1.5),
+    Operation(
+        "Unscheduled intervention", MULTICAT, on_site_hours=20, per_year=1.5,
+        per_device=True,
+    ),
 )
+
+#: Devices one campaign can service before it has to come back another day.
+#:
+#: Without a limit, a campaign operation on a large array needs a single
+#: absurd weather window - a ten-device inspection at six hours each would want
+#: sixty continuous workable hours plus transit, which at these sites is rarer
+#: than the job is frequent. Real operations split across trips.
+#:
+#: Four is a judgement, chosen so a campaign's window stays comparable to the
+#: single-device operations already in the model (4 x 6 h + transit is about
+#: 30 h, in line with the existing 29-37 h requirements).
+DEFAULT_DEVICES_PER_CAMPAIGN = 4
+
+
+def scale_operations(
+    operations: tuple,
+    n_devices: int,
+    devices_per_campaign: int = DEFAULT_DEVICES_PER_CAMPAIGN,
+) -> tuple:
+    """Adapt an operation set to an array of ``n_devices``.
+
+    This is where the array argument either holds or fails, so the two cases
+    are kept explicit:
+
+    * **Per-device operations** (breakdowns) scale in *frequency*. Ten devices
+      break ten times as often and each failure needs its own sailing. Nothing
+      is shared, and mobilisation is still charged once per vessel per year.
+    * **Campaign operations** (inspection, planned maintenance) scale in
+      *duration*, up to ``devices_per_campaign`` devices per trip, then in
+      trip count. One sailing, one weather window, several devices serviced.
+
+    The saving comes from the second case and from mobilisation being a
+    per-campaign cost rather than a per-device one. The offsetting penalty is
+    that a longer campaign needs a longer weather window, and long windows are
+    disproportionately rarer than short ones - so the benefit is real but
+    self-limiting, which is why ``devices_per_campaign`` exists.
+
+    Returns the operations unchanged when ``n_devices == 1``.
+    """
+    from dataclasses import replace
+    from math import ceil
+
+    if n_devices < 1:
+        raise ValueError(f"n_devices must be at least 1, got {n_devices}")
+    if devices_per_campaign < 1:
+        raise ValueError("devices_per_campaign must be at least 1")
+    if n_devices == 1:
+        return tuple(operations)
+
+    scaled = []
+    for operation in operations:
+        if operation.per_device:
+            scaled.append(replace(operation, per_year=operation.per_year * n_devices))
+        else:
+            per_trip = min(n_devices, devices_per_campaign)
+            trips = ceil(n_devices / devices_per_campaign)
+            scaled.append(
+                replace(
+                    operation,
+                    on_site_hours=operation.on_site_hours * per_trip,
+                    per_year=operation.per_year * trips,
+                )
+            )
+    return tuple(scaled)
 
 
 @dataclass(frozen=True)

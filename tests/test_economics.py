@@ -26,9 +26,18 @@ from src.config import (
     great_circle_km,
     nearest_port,
 )
+from src.economics.breakeven import (
+    array_sweep,
+    breakeven_device_capex_usd,
+    breakeven_price_usd_per_mwh,
+    breakeven_surface,
+    net_annual_usd,
+    weather_profile,
+)
 from src.economics.deployment import (
     AHTS,
     ANNUAL_OPERATIONS,
+    scale_operations,
     CTV,
     DEFAULT_STANDBY_CAP_HOURS,
     SiteLogistics,
@@ -840,3 +849,144 @@ class TestDatetimeResolutionIndependence:
         assert downtime_fraction(self._series(unit), site) == pytest.approx(
             downtime_fraction(self._series("ns"), site)
         )
+
+
+class TestArrayScaling:
+    """An array shares some costs and multiplies others.
+
+    The whole argument for building more than one device rests on which is
+    which, so the split is asserted rather than assumed.
+    """
+
+    def test_single_device_is_unchanged(self):
+        assert scale_operations(ANNUAL_OPERATIONS, 1) == ANNUAL_OPERATIONS
+
+    def test_breakdowns_scale_in_frequency_not_duration(self):
+        scaled = scale_operations(ANNUAL_OPERATIONS, 10)
+        original = [op for op in ANNUAL_OPERATIONS if op.per_device][0]
+        after = [op for op in scaled if op.per_device][0]
+        assert after.per_year == pytest.approx(10 * original.per_year)
+        assert after.on_site_hours == original.on_site_hours
+
+    def test_campaigns_scale_in_duration_then_trips(self):
+        original = [op for op in ANNUAL_OPERATIONS if not op.per_device][0]
+
+        four = [o for o in scale_operations(ANNUAL_OPERATIONS, 4) if not o.per_device][0]
+        assert four.on_site_hours == pytest.approx(4 * original.on_site_hours)
+        assert four.per_year == pytest.approx(original.per_year)
+
+        # Beyond the campaign limit it is extra trips, not a longer window.
+        ten = [o for o in scale_operations(ANNUAL_OPERATIONS, 10) if not o.per_device][0]
+        assert ten.on_site_hours == four.on_site_hours
+        assert ten.per_year == pytest.approx(3 * original.per_year)
+
+    def test_campaign_window_does_not_grow_without_bound(self):
+        """The self-limiting part: a longer campaign needs a rarer window."""
+        big = scale_operations(ANNUAL_OPERATIONS, 100)
+        for operation in big:
+            assert window_hours_required(operation, 70.0) < 24 * 7
+
+    def test_rejects_nonsense_sizes(self):
+        with pytest.raises(ValueError):
+            scale_operations(ANNUAL_OPERATIONS, 0)
+        with pytest.raises(ValueError):
+            scale_operations(ANNUAL_OPERATIONS, 5, devices_per_campaign=0)
+
+    def test_om_per_device_falls_with_array_size(self):
+        """The reason to build an array at all."""
+        hs = make_hs(seed=21)
+        site = SiteLogistics(distance_km=70)
+        one = evaluate_site(hs, 490.0 * hs**2 * 8.0, site, n_devices=1)
+        ten = evaluate_site(hs, 490.0 * hs**2 * 8.0, site, n_devices=10)
+        assert ten["om_per_device_usd"] < one["om_annual_usd"]
+
+    def test_downtime_is_per_device_not_multiplied_by_the_array(self):
+        """A device is not down more often because it has neighbours."""
+        hs = make_hs(seed=22)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=70)
+        one = evaluate_site(hs, flux, site, n_devices=1)
+        twenty = evaluate_site(hs, flux, site, n_devices=20)
+        assert twenty["downtime_fraction"] == pytest.approx(one["downtime_fraction"])
+
+    def test_energy_and_device_capex_scale_linearly(self):
+        hs = make_hs(seed=23)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=70)
+        one = evaluate_site(hs, flux, site, n_devices=1)
+        five = evaluate_site(hs, flux, site, n_devices=5)
+        assert five["annual_energy_mwh"] == pytest.approx(
+            5 * one["annual_energy_mwh"]
+        )
+
+
+class TestBreakeven:
+    @staticmethod
+    def _case(n_devices=1):
+        hs = make_hs(seed=31)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=70)
+        return hs, flux, site, weather_profile(hs, site, n_devices)
+
+    def test_fast_path_agrees_with_evaluate_site(self):
+        """A fast path that quietly disagrees with the slow one is worse than none."""
+        for n in (1, 5):
+            hs, flux, site, profile = self._case(n)
+            fast = net_annual_usd(profile, flux, hs, DeviceSpec(), MarketSpec())
+            slow = evaluate_site(hs, flux, site, n_devices=n)
+            assert fast["net_annual_usd"] == pytest.approx(slow["net_annual_usd"])
+            assert fast["annual_energy_mwh"] == pytest.approx(
+                slow["annual_energy_mwh"]
+            )
+            assert fast["om_annual_usd"] == pytest.approx(slow["om_annual_usd"])
+
+    def test_breakeven_price_zeroes_the_net(self):
+        hs, flux, site, profile = self._case()
+        device = DeviceSpec()
+        price = breakeven_price_usd_per_mwh(profile, flux, hs, device)
+        result = net_annual_usd(
+            profile, flux, hs, device, MarketSpec(energy_price_usd_per_mwh=price)
+        )
+        assert result["net_annual_usd"] == pytest.approx(0.0, abs=1.0)
+
+    def test_breakeven_capex_zeroes_the_net(self):
+        from dataclasses import replace
+
+        hs, flux, site, profile = self._case()
+        device = DeviceSpec()
+        capex = breakeven_device_capex_usd(profile, flux, hs, device, MarketSpec())
+        result = net_annual_usd(
+            profile, flux, hs, replace(device, capex_usd=capex), MarketSpec()
+        )
+        assert result["net_annual_usd"] == pytest.approx(0.0, abs=1.0)
+
+    def test_negative_breakeven_capex_is_reported_not_clipped(self):
+        """Operating cost above revenue is a real answer, not an error."""
+        hs = make_hs(mean=4.0, seed=32)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=250)
+        profile = weather_profile(hs, site, 1)
+        capex = breakeven_device_capex_usd(
+            profile, flux, hs, DeviceSpec(capture_width_m=1.0), MarketSpec(
+                energy_price_usd_per_mwh=5.0
+            )
+        )
+        assert capex < 0
+
+    def test_array_sweep_shape_and_monotonicity(self):
+        hs = make_hs(seed=33)
+        flux = 490.0 * hs**2 * 8.0
+        sweep = array_sweep(hs, flux, SiteLogistics(distance_km=70), (1, 5, 10))
+        assert list(sweep.index) == [1, 5, 10]
+        # Sharing campaigns and mobilisation must reduce per-device O&M.
+        assert sweep["om_per_device_$k"].is_monotonic_decreasing
+
+    def test_breakeven_surface_rises_with_width_and_price(self):
+        hs = make_hs(seed=34)
+        flux = 490.0 * hs**2 * 8.0
+        surface = breakeven_surface(
+            hs, flux, SiteLogistics(distance_km=70),
+            capture_widths=(10, 20), prices=(60, 240),
+        )
+        assert surface.loc[20, "$60/MWh"] > surface.loc[10, "$60/MWh"]
+        assert surface.loc[10, "$240/MWh"] > surface.loc[10, "$60/MWh"]
