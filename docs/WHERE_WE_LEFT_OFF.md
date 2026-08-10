@@ -205,7 +205,61 @@ being threaded.
 
 ## 6. What is next (the plan being executed now)
 
-### Phase 1 — array economics + break-even inversion  ← IN PROGRESS
+### Phase 1 — array economics + break-even inversion  ← DONE, and it settles the question
+
+**Array scaling at 46041** (real data, run 31344776138):
+
+| N | O&M per device $k | capex per device $k | net per device $k | break-even price $/MWh | break-even capex $M |
+|---|---|---|---|---|---|
+| 1 | 213.3 | 13,166 | −691.1 | 529 | −1.8 |
+| 2 | 145.9 | 13,004 | −609.3 | 481 | −0.2 |
+| 5 | 126.4 | 12,906 | −581.2 | 464 | +0.4 |
+| 10 | 107.0 | 12,874 | −558.9 | 451 | +0.8 |
+| 20 | 97.3 | 12,857 | −547.7 | 444 | +1.0 |
+
+**I was wrong about the array being the biggest cost lever.** It halves O&M per
+device (213 → 97 $k, −54%) and moves net per device by only −21%. The reason is
+arithmetic: annualised capex is ~86% of per-device annual cost, and device
+capex does not amortise across an array at all — only mobilisation, moorings
+and campaign sharing do. Diminishing returns are steep: 1→2 devices saves
+$82k/device, 10→20 saves $11k.
+
+**Break-even, all three sites:**
+
+| site | N | break-even price $/MWh | × vs $120 | break-even capex $M | × vs $12M |
+|---|---|---|---|---|---|
+| 46041 | 1 | 529 | 4.4 | −1.82 | −0.15 |
+| 46041 | 10 | 451 | 3.8 | +0.82 | 0.07 |
+| 46087 | 1 | 778 | 6.5 | −2.90 | −0.24 |
+| 46087 | 10 | 665 | 5.5 | **−0.33** | −0.03 |
+| 46029 | 1 | 562 | 4.7 | −2.00 | −0.17 |
+| 46029 | 10 | 479 | 4.0 | +0.62 | 0.05 |
+
+**46087 stays negative even as a ten-device array**: operating cost alone
+exceeds revenue, so the device would have to be free *and* subsidised. Note
+that this is the site where the ML postprocessing edge lives.
+
+**Break-even device capex ($M) at 46041, 10-device array** — compare to $12M:
+
+| capture width | $60/MWh | $120 | $250 | $400 |
+|---|---|---|---|---|
+| 10 m | −2.17 | −1.11 | 1.18 | 3.82 |
+| 20 m | −1.20 | **0.82** | 5.21 | 10.28 |
+| 35 m | −0.05 | 3.13 | 10.01 | 17.95 |
+| 50 m | 0.80 | 4.84 | **13.57** | 23.66 |
+| 75 m | 1.83 | 6.88 | 17.84 | **30.48** |
+
+Only two cells clear $12M: **$250/MWh with 50 m capture**, or **$400/MWh with
+35 m**. At the baseline 20 m / $120 the device may cost $0.82M — capex must
+fall **93%**.
+
+**The verdict.** Closing the gap needs roughly a **5× improvement in the
+product of price × capture width**, or a 93% capex reduction. That is a
+technology-generation change, not a siting or operations change. No
+arrangement of these three sites, at any array size in the model, reaches
+zero at plausible parameters.
+
+### Phase 1 (original motivation, kept for the record)
 
 **Why.** One device is the wrong unit of analysis. Mobilisation is $250k *per
 campaign*, not per device. CTV visits, standby, and weather-window waits all
@@ -218,7 +272,7 @@ sweep capex / capture width / price / rated power and find the **break-even
 surface**. That converts "loses money" into "needs a 4× revenue improvement or
 a 75% cost cut", which is the number that decides whether to continue.
 
-### Phase 2 — move forecast value to market settlement
+### Phase 2 — move forecast value to market settlement (reframed by Phase 1)
 
 Currently forecast skill only touches vessel false-starts (~$76k across the
 plausible RMSE range). The frame where it has real value is **day-ahead market
@@ -226,10 +280,16 @@ settlement**: commit MWh a day ahead, get penalised for deviating. Forecast
 error becomes a cost proportional to *production* rather than to vessel days,
 and the +14.5% postprocessing edge at 46087 finally gets a price tag.
 
-**Sequencing matters:** a single sub-scale demonstration unit does not bid into
-a day-ahead market, it takes a flat PPA. The market frame only becomes
-realistic at array scale — so Phase 1 is a precondition for Phase 2 being
-honest, not just a cost lever.
+**Phase 1 changes what this phase can claim.** Settlement penalties are a few
+percent of revenue; the gap to break-even is 3.8×. So Phase 2 **cannot** rescue
+the business case and should not be sold as trying to. What it can still do —
+and this is the project's actual stated goal — is put an honest dollar value on
+a forecasting edge in the frame where forecasting genuinely pays. That is a
+transferable method result: the number survives even though this particular
+deployment does not.
+
+Note the awkward pairing: the ML edge is at 46087, which is the *worst* site
+economically and the only one still negative as a ten-device array.
 
 ### Deliberately not done
 
