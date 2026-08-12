@@ -1,0 +1,19 @@
+# Minimal dependency set for the NDBC buoy pilot.
+#
+# Loose lower bounds rather than the exact pins in requirements.txt, so this
+# installs on an older machine where the pinned numpy/pandas (which need Python
+# 3.11+) would not resolve. Everything the pilot needs and nothing else - no
+# xarray, no copernicusmarine, no AWS SDK.
+#
+#   python3 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements-pilot.txt
+#   python experiments/pilot_ndbc.py --station 46041 --years 2015-2023
+#
+# Works on Python 3.9 and newer.
+
+numpy>=1.23
+pandas>=1.5
+scikit-learn>=1.1
+lightgbm>=3.3
+requests>=2.28

@@ -31,12 +31,25 @@ This repository is **in active development** with cloud infrastructure deployed 
 - **Automated data cleaning** and temporal aggregation functions
 - **Monthly/seasonal statistics** calculation framework
 
-### 🔜 Next Steps (This Week)
-- Complete **30GB+ dataset downloads** (estimated completion: ~24 hours)
-- Deploy **wave power flux analysis** on full Pacific Northwest datasets
-- Build **baseline forecasting models** (lag-1 regression, Random Forest)
-- Generate **revenue surface maps** and site rankings
-- Create **model validation framework** with RMSE benchmarking
+**Forecasting Framework**
+- **Pluggable model interface** (`src/models/base.py`) — baselines, ridge and
+  LightGBM implemented; Transformer and PINN rungs plug in at the same point
+- **NDBC buoy pipeline** for Washington-coast stations (46041, 46087, 46029)
+- **Leakage-safe temporal splits** with enforced gaps and rolling-origin backtesting
+- **Per-horizon verification**: RMSE, bias, storm-conditioned error, and skill
+  against a configurable reference
+- 163 tests, 85% coverage
+
+### 🔜 Next Steps
+- Run the [buoy pilot](docs/pilot_experiment.md) on real NDBC data and publish
+  the per-horizon skill table
+- Build the paired GEFSv12 forecast/observation dataset for NWP postprocessing
+- Complete the gridded Copernicus + NOAA pipeline
+- Add the deep-learning rungs once LightGBM has set the bar
+
+See [`docs/forecasting_architecture.md`](docs/forecasting_architecture.md) for
+the full plan and [`docs/pilot_experiment.md`](docs/pilot_experiment.md) for how
+to run the pilot.
 
 ---
 

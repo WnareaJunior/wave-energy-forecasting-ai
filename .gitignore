@@ -206,9 +206,12 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Data files
-data/
+# Data files (leading slash: only the top-level data dir, not src/data/)
+/data/
 *.nc
 *.zarr
 *.hdf5
 *.csv
+
+# Experiment outputs
+results/

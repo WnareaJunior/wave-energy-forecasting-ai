@@ -1,0 +1,992 @@
+"""Tests for the deployment, accessibility and revenue models.
+
+The claim this whole module set exists to support is that **ranking sites on
+wave power alone is misleading**, because access cost rises with the same seas
+that carry the energy. Several tests below assert exactly that relationship
+rather than just checking arithmetic.
+"""
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src.config import (
+    NDBC_STATIONS,
+    PORT_CLASS_HEAVY,
+    PORT_CLASS_LIGHT,
+    PORT_CLASS_WORKBOAT,
+    Port,
+    great_circle_km,
+    nearest_port,
+)
+from src.economics.accessibility import (
+    accessible_fraction,
+    expected_waiting_hours,
+    find_windows,
+    seasonal_accessibility,
+    window_statistics,
+)
+from src.economics.breakeven import (
+    array_sweep,
+    breakeven_device_capex_usd,
+    breakeven_price_usd_per_mwh,
+    breakeven_surface,
+    net_annual_usd,
+    weather_profile,
+)
+from src.economics.deployment import (
+    AHTS,
+    ANNUAL_OPERATIONS,
+    CTV,
+    DEFAULT_STANDBY_CAP_HOURS,
+    SiteLogistics,
+    false_start_multiplier,
+    mooring_capex,
+    operation_cost,
+    scale_operations,
+    site_logistics,
+    transit_hours,
+    window_hours_required,
+)
+from src.economics.revenue import (
+    DeviceSpec,
+    MarketSpec,
+    annual_energy_mwh,
+    annual_om_cost,
+    downtime_fraction,
+    evaluate_site,
+)
+
+
+def make_hs(mean=2.5, amplitude=1.2, years=3, seed=0, freq="1h"):
+    """Synthetic Hs with a winter peak and storm-scale persistence."""
+    index = pd.date_range("2016-01-01", periods=int(years * 8766), freq=freq, tz="UTC")
+    rng = np.random.default_rng(seed)
+    doy = index.dayofyear.to_numpy()
+    seasonal = mean + amplitude * np.cos(2 * np.pi * (doy - 5) / 365.25)
+    # AR(1) so calm and rough conditions come in runs, as they do at sea.
+    noise = rng.normal(0, 0.3, len(index))
+    ar = np.zeros(len(index))
+    for i in range(1, len(index)):
+        ar[i] = 0.98 * ar[i - 1] + noise[i]
+    return pd.Series(np.clip(seasonal + ar, 0.2, 15.0), index=index, name="WVHT")
+
+
+class TestTransitAndWindows:
+    def test_transit_is_round_trip(self):
+        """A 100 km site at 11 kn is about 10 hours there and back."""
+        assert transit_hours(100.0, AHTS) == pytest.approx(9.82, rel=0.02)
+
+    def test_faster_vessel_transits_quicker(self):
+        assert transit_hours(100.0, CTV) < transit_hours(100.0, AHTS)
+
+    def test_window_includes_transit_and_contingency(self):
+        operation = ANNUAL_OPERATIONS[0]
+        required = window_hours_required(operation, 100.0)
+        assert required > operation.on_site_hours
+        assert required > transit_hours(100.0, operation.vessel)
+
+    def test_distance_lengthens_the_required_window(self):
+        """The mechanism by which distance penalises a site twice."""
+        operation = ANNUAL_OPERATIONS[0]
+        assert window_hours_required(operation, 200.0) > window_hours_required(
+            operation, 20.0
+        )
+
+
+class TestFindWindows:
+    def test_finds_a_calm_stretch(self):
+        index = pd.date_range("2016-01-01", periods=100, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(100, 3.0), index=index)
+        hs.iloc[20:50] = 1.0
+        windows = find_windows(hs, threshold_m=1.5, min_hours=10)
+        assert len(windows) == 1
+        assert windows.iloc[0]["duration_hours"] == pytest.approx(30, abs=1)
+
+    def test_ignores_windows_that_are_too_short(self):
+        index = pd.date_range("2016-01-01", periods=100, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(100, 3.0), index=index)
+        hs.iloc[20:25] = 1.0
+        assert find_windows(hs, 1.5, min_hours=10).empty
+
+    def test_a_gap_breaks_a_window(self):
+        """Missing data cannot be asserted to have been calm."""
+        index = pd.date_range("2016-01-01", periods=60, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(60, 1.0), index=index)
+        hs.iloc[30] = np.nan
+        windows = find_windows(hs, 1.5, min_hours=5)
+        assert len(windows) == 2
+
+    def test_longer_jobs_find_fewer_windows(self):
+        """The non-linearity that makes distant sites disproportionately hard."""
+        hs = make_hs()
+        short = len(find_windows(hs, 1.5, min_hours=6))
+        long = len(find_windows(hs, 1.5, min_hours=48))
+        assert long < short
+
+    def test_empty_input(self):
+        empty = pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
+        assert find_windows(empty, 1.5, 6).empty
+
+    def test_works_on_a_read_only_backed_series(self):
+        """Regression: pandas 3 copy-on-write returns read-only arrays.
+
+        `(hs <= threshold).to_numpy()` hands back a read-only view under
+        pandas 3, so the in-place `&=` that follows raised "output array is
+        read-only". It passed locally on pandas 2.3 and failed in CI on 3.0 -
+        the notebook run was the first thing to catch it.
+        """
+        values = np.full(200, 1.0)
+        values[50:100] = 3.0
+        values.flags.writeable = False
+        index = pd.date_range("2016-01-01", periods=200, freq="1h", tz="UTC")
+        hs = pd.Series(values, index=index)
+
+        windows = find_windows(hs, threshold_m=1.5, min_hours=10)
+        assert not windows.empty
+
+
+class TestAccessibility:
+    def test_fraction_below_threshold(self):
+        index = pd.date_range("2016-01-01", periods=100, freq="1h", tz="UTC")
+        hs = pd.Series(np.concatenate([np.full(40, 1.0), np.full(60, 3.0)]), index=index)
+        assert accessible_fraction(hs, 1.5) == pytest.approx(0.4)
+
+    def test_higher_threshold_is_more_accessible(self):
+        hs = make_hs()
+        assert accessible_fraction(hs, 2.5) > accessible_fraction(hs, 1.5)
+
+    def test_waiting_time_grows_with_job_length(self):
+        hs = make_hs()
+        short = expected_waiting_hours(hs, 2.0, 12)
+        long = expected_waiting_hours(hs, 2.0, 72)
+        assert long > short
+
+    def test_waiting_time_grows_as_the_limit_tightens(self):
+        hs = make_hs()
+        assert expected_waiting_hours(hs, 1.5, 24) > expected_waiting_hours(hs, 2.5, 24)
+
+    def test_rougher_site_waits_longer(self):
+        """The core claim: energetic sites cost more to reach."""
+        calm = make_hs(mean=1.5, seed=1)
+        rough = make_hs(mean=3.5, seed=1)
+        assert expected_waiting_hours(rough, 2.0, 24) > expected_waiting_hours(
+            calm, 2.0, 24
+        )
+
+    def test_no_adequate_window_gives_nan(self):
+        index = pd.date_range("2016-01-01", periods=200, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(200, 6.0), index=index)
+        assert np.isnan(expected_waiting_hours(hs, 1.5, 24))
+
+    def test_statistics_keys(self):
+        stats = window_statistics(make_hs(), 2.0, 24)
+        assert {"accessible_fraction", "windows_per_year", "expected_wait_hours"} <= set(
+            stats
+        )
+
+    def test_winter_is_less_accessible_than_summer(self):
+        """On this coast the energetic season is the inaccessible season."""
+        table = seasonal_accessibility(make_hs(), 2.0, 24)
+        assert (
+            table.loc["winter (DJF)", "accessible_fraction"]
+            < table.loc["summer (JJA)", "accessible_fraction"]
+        )
+
+    def test_seasonal_output_omits_the_meaningless_wait(self):
+        """Subsetting by month makes expected_wait_hours nonsense.
+
+        The same season across years is concatenated, so the wait runs from
+        February into the following December and counts nine months of summer
+        as waiting. Real output showed 5,307 hours for a 90-day winter. The
+        column is dropped rather than reported wrong.
+        """
+        table = seasonal_accessibility(make_hs(), 2.0, 24)
+        assert "expected_wait_hours" not in table.columns
+        assert "accessible_fraction" in table.columns
+        assert "windows_per_year" in table.columns
+
+
+class TestEnergy:
+    def test_rated_power_clips_output(self):
+        index = pd.date_range("2016-01-01", periods=8766, freq="1h", tz="UTC")
+        flux = pd.Series(np.full(8766, 1_000_000.0), index=index)  # 1000 kW/m
+        device = DeviceSpec(capture_width_m=10, efficiency=0.35, rated_power_kw=500)
+        result = annual_energy_mwh(flux, device)
+        # Raw would be 3500 kW; the generator caps at 500.
+        assert result["annual_energy_mwh"] == pytest.approx(500 * 8766 / 1000, rel=0.01)
+        assert result["clipped_fraction"] > 0.8
+
+    def test_capacity_factor_is_bounded(self):
+        hs = make_hs()
+        flux = 490.0 * hs**2 * 8.0
+        result = annual_energy_mwh(flux, DeviceSpec(), hs)
+        assert 0.0 <= result["capacity_factor"] <= 1.0
+
+    def test_survival_shutdown_removes_energy(self):
+        hs = make_hs(mean=5.0, amplitude=3.0)
+        flux = 490.0 * hs**2 * 8.0
+        with_cutout = annual_energy_mwh(flux, DeviceSpec(survival_hs_m=6.0), hs)
+        without = annual_energy_mwh(flux, DeviceSpec(survival_hs_m=99.0), hs)
+        assert with_cutout["annual_energy_mwh"] < without["annual_energy_mwh"]
+        assert with_cutout["survival_fraction"] > 0
+
+    def test_empty_input(self):
+        empty = pd.Series(dtype=float, index=pd.DatetimeIndex([], tz="UTC"))
+        assert np.isnan(annual_energy_mwh(empty, DeviceSpec())["annual_energy_mwh"])
+
+
+class TestCosts:
+    def test_standby_is_charged(self):
+        operation = ANNUAL_OPERATIONS[0]
+        dry = operation_cost(operation, 50.0, waiting_hours=0.0)
+        waiting = operation_cost(operation, 50.0, waiting_hours=48.0)
+        assert waiting["total_usd"] > dry["total_usd"]
+
+    def test_mooring_cost_rises_with_depth(self):
+        shallow = mooring_capex(SiteLogistics(distance_km=50, water_depth_m=50))
+        deep = mooring_capex(SiteLogistics(distance_km=50, water_depth_m=200))
+        assert deep > shallow
+
+    def test_om_cost_rises_with_distance(self):
+        hs = make_hs()
+        near = annual_om_cost(hs, SiteLogistics(distance_km=20))
+        far = annual_om_cost(hs, SiteLogistics(distance_km=200))
+        assert far["total_annual_usd"] > near["total_annual_usd"]
+
+    def test_sea_state_penalty_lands_on_downtime_not_vessel_hire(self):
+        """Two sites the same distance out, different wave climates.
+
+        With the standby cap in place both sites hit the same hire ceiling, so
+        vessel cost barely separates them. The rough site is penalised through
+        downtime instead - the device waits, the vessel does not. Asserting the
+        old relationship would re-enshrine the bug the cap fixed.
+        """
+        site = SiteLogistics(distance_km=60)
+        calm_hs = make_hs(mean=1.5, seed=2)
+        rough_hs = make_hs(mean=3.5, seed=2)
+
+        assert annual_om_cost(rough_hs, site)["total_annual_usd"] >= annual_om_cost(
+            calm_hs, site
+        )["total_annual_usd"]
+        assert downtime_fraction(rough_hs, site) > downtime_fraction(calm_hs, site)
+
+    def test_standby_is_capped(self):
+        """A vessel is not kept on hire for a thousand hours."""
+        operation = ANNUAL_OPERATIONS[0]
+        modest = operation_cost(operation, 50.0, waiting_hours=40.0)
+        absurd = operation_cost(operation, 50.0, waiting_hours=4000.0)
+        assert absurd["charged_wait_hours"] == DEFAULT_STANDBY_CAP_HOURS
+        assert absurd["uncharged_wait_hours"] == pytest.approx(4000.0 - DEFAULT_STANDBY_CAP_HOURS)
+        assert absurd["total_usd"] < modest["total_usd"] * 2
+
+    def test_uncapped_standby_would_be_absurd(self):
+        """Guards the reason the cap exists.
+
+        Without it, one operation at an exposed site costs more than the
+        device earns in a year.
+        """
+        operation = ANNUAL_OPERATIONS[2]
+        uncapped = operation_cost(
+            operation, 150.0, waiting_hours=2500.0, standby_cap_hours=1e9
+        )
+        assert uncapped["total_usd"] > 1_000_000
+
+
+class TestForecastValue:
+    """Forecast skill enters the economics through aborted sailings."""
+
+    def test_perfect_forecast_costs_nothing_extra(self):
+        assert false_start_multiplier(0.0, 2.0) == 1.0
+
+    def test_worse_forecast_means_more_sailings(self):
+        assert false_start_multiplier(0.8, 2.0) >= false_start_multiplier(0.2, 2.0)
+
+    def test_multiplier_is_at_least_one(self):
+        for rmse in (0.0, 0.1, 0.5, 2.0):
+            assert false_start_multiplier(rmse, 2.0) >= 1.0
+
+    def test_forecast_error_raises_om_cost(self):
+        """The dollar value of the forecast work, made explicit."""
+        hs = make_hs()
+        site = SiteLogistics(distance_km=80)
+        perfect = annual_om_cost(hs, site, forecast_rmse_m=0.0)
+        gefs = annual_om_cost(hs, site, forecast_rmse_m=0.41)
+        assert gefs["total_annual_usd"] > perfect["total_annual_usd"]
+
+    def test_multiplier_actually_varies_with_rmse(self):
+        """Regression: it used to be constant.
+
+        The margin was set equal to the RMSE, so the RMSE cancelled out of
+        z = margin / (rmse * sqrt(2)) and every forecast quality returned
+        1.19. Only visible once several RMSE values were printed side by side
+        and every row was identical.
+        """
+        values = [false_start_multiplier(r, 1.75) for r in (0.2, 0.41, 0.6, 1.0)]
+        assert len(set(round(v, 4) for v in values)) == len(values)
+        assert values == sorted(values), "a worse forecast must cost more"
+        assert values[-1] > values[0] * 1.2
+
+
+class TestSensitivityPlumbing:
+    """Operations must be passable, not patched onto a module global."""
+
+    def test_scaled_day_rates_change_the_cost(self):
+        from dataclasses import replace
+
+        import src.economics.deployment as dep
+
+        hs = make_hs()
+        site = SiteLogistics(distance_km=80)
+        dearer = tuple(
+            replace(op, vessel=replace(op.vessel, day_rate_usd=op.vessel.day_rate_usd * 2))
+            for op in dep.ANNUAL_OPERATIONS
+        )
+        base = annual_om_cost(hs, site)["total_annual_usd"]
+        scaled = annual_om_cost(hs, site, operations=dearer)["total_annual_usd"]
+        assert scaled > base * 1.5
+
+    def test_failure_rate_changes_downtime(self):
+        from dataclasses import replace
+
+        import src.economics.deployment as dep
+
+        hs = make_hs()
+        site = SiteLogistics(distance_km=80)
+        frequent = tuple(
+            replace(op, per_year=op.per_year * 3 if "Unscheduled" in op.name else op.per_year)
+            for op in dep.ANNUAL_OPERATIONS
+        )
+        assert downtime_fraction(hs, site, frequent) > downtime_fraction(hs, site)
+
+    def test_evaluate_site_threads_operations_through(self):
+        """The bug: rebinding the module global left every scenario identical."""
+        from dataclasses import replace
+
+        import src.economics.deployment as dep
+
+        hs = make_hs()
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=80)
+        dearer = tuple(
+            replace(op, vessel=replace(op.vessel, day_rate_usd=op.vessel.day_rate_usd * 3))
+            for op in dep.ANNUAL_OPERATIONS
+        )
+        base = evaluate_site(hs, flux, site)["net_annual_usd"]
+        scaled = evaluate_site(hs, flux, site, operations=dearer)["net_annual_usd"]
+        assert scaled < base
+
+    def test_downtime_rises_with_distance(self):
+        hs = make_hs()
+        assert downtime_fraction(hs, SiteLogistics(distance_km=200)) > downtime_fraction(
+            hs, SiteLogistics(distance_km=20)
+        )
+
+    def test_downtime_is_a_fraction(self):
+        hs = make_hs(mean=4.0)
+        assert 0.0 <= downtime_fraction(hs, SiteLogistics(distance_km=150)) <= 1.0
+
+
+class TestSiteEvaluation:
+    def test_returns_the_headline_quantities(self):
+        hs = make_hs()
+        flux = 490.0 * hs**2 * 8.0
+        result = evaluate_site(hs, flux, SiteLogistics(distance_km=50))
+        assert {"net_annual_usd", "gross_annual_usd", "om_annual_usd"} <= set(result)
+
+    def test_net_is_below_gross(self):
+        """The gap between them is the entire point of this module."""
+        hs = make_hs()
+        flux = 490.0 * hs**2 * 8.0
+        result = evaluate_site(hs, flux, SiteLogistics(distance_km=50))
+        assert result["net_annual_usd"] < result["gross_annual_usd"]
+
+    def test_distance_reduces_net_revenue_at_equal_resource(self):
+        """Identical wave climate, different distance: net must fall."""
+        hs = make_hs()
+        flux = 490.0 * hs**2 * 8.0
+        near = evaluate_site(hs, flux, SiteLogistics(distance_km=20))
+        far = evaluate_site(hs, flux, SiteLogistics(distance_km=250))
+        assert near["gross_annual_usd"] == pytest.approx(far["gross_annual_usd"])
+        assert near["net_annual_usd"] > far["net_annual_usd"]
+
+    def test_energetic_sites_pay_a_penalty_a_resource_ranking_misses(self):
+        """The claim that justifies the whole module.
+
+        A more energetic site earns more gross revenue *and* is harder to
+        reach. Gross ranking sees only the first; downtime carries the second,
+        so the net gap is always narrower than the gross gap.
+        """
+        calm = make_hs(mean=2.0, seed=3)
+        rough = make_hs(mean=3.2, seed=3)
+        site = SiteLogistics(distance_km=220)
+
+        calm_result = evaluate_site(calm, 490.0 * calm**2 * 8.0, site)
+        rough_result = evaluate_site(rough, 490.0 * rough**2 * 8.0, site)
+
+        assert rough_result["gross_annual_usd"] > calm_result["gross_annual_usd"]
+        assert rough_result["downtime_fraction"] > calm_result["downtime_fraction"]
+
+        gross_gap = rough_result["gross_annual_usd"] - calm_result["gross_annual_usd"]
+        net_gap = rough_result["net_annual_usd"] - calm_result["net_annual_usd"]
+        assert net_gap < gross_gap
+
+    def test_price_scales_revenue(self):
+        hs = make_hs()
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=50)
+        cheap = evaluate_site(hs, flux, site, market=MarketSpec(energy_price_usd_per_mwh=60))
+        dear = evaluate_site(hs, flux, site, market=MarketSpec(energy_price_usd_per_mwh=240))
+        assert dear["gross_annual_usd"] == pytest.approx(
+            4 * cheap["gross_annual_usd"], rel=0.01
+        )
+
+
+class TestPortAssignment:
+    """The support port is a property of (site, vessel), not of the site.
+
+    The model originally costed every vessel at every site from a single base
+    at Grays Harbor. That charged the Neah Bay buoy a 183 km transit for a
+    routine inspection when the town of Neah Bay is 16 km away, and it did so
+    at the one site where the forecast postprocessing showed real skill. These
+    tests pin the corrected behaviour, including the constraint that made the
+    original assumption tempting: a harbour that can take a crew boat cannot
+    necessarily take an anchor handler.
+    """
+
+    def test_port_class_ordering_is_a_ceiling_not_a_list(self):
+        small = Port("small", 48.0, -124.0, PORT_CLASS_LIGHT)
+        big = Port("big", 48.0, -124.0, PORT_CLASS_HEAVY)
+
+        assert small.can_host(PORT_CLASS_LIGHT)
+        assert not small.can_host(PORT_CLASS_WORKBOAT)
+        assert not small.can_host(PORT_CLASS_HEAVY)
+        # A heavy port takes everything smaller too.
+        assert all(
+            big.can_host(c)
+            for c in (PORT_CLASS_LIGHT, PORT_CLASS_WORKBOAT, PORT_CLASS_HEAVY)
+        )
+
+    def test_rejects_unknown_class(self):
+        with pytest.raises(ValueError):
+            Port("bad", 48.0, -124.0, "supertanker")
+        with pytest.raises(ValueError):
+            Port("ok", 48.0, -124.0).can_host("supertanker")
+
+    def test_nearest_port_refuses_rather_than_downgrading(self):
+        """No capable port must raise, not silently return an unusable one.
+
+        Falling back to the closest port regardless of class would reintroduce
+        precisely the error this module exists to correct, and it would do it
+        invisibly.
+        """
+        light_only = (Port("tiny", 48.0, -124.0, PORT_CLASS_LIGHT),)
+        with pytest.raises(ValueError):
+            nearest_port(48.5, -124.7, PORT_CLASS_HEAVY, light_only)
+
+    def test_anchor_handler_is_not_based_at_neah_bay(self):
+        """The regression that motivated the whole change, from the other side.
+
+        Neah Bay is by far the closest harbour to buoy 46087, so a
+        class-blind nearest-port rule would put the tow-out spread there. It
+        has no quay or laydown for a 61 m spar.
+        """
+        station = NDBC_STATIONS["46087"]
+        site = site_logistics(station.latitude, station.longitude)
+
+        assert "Neah Bay" not in site.port_for(AHTS)
+        assert "Neah Bay" in site.port_for(CTV)
+
+    def test_service_and_towout_distances_differ_by_an_order_of_magnitude(self):
+        station = NDBC_STATIONS["46087"]
+        site = site_logistics(station.latitude, station.longitude)
+
+        assert site.distance_for(CTV) < 25.0
+        assert site.distance_for(AHTS) > 90.0
+        assert site.distance_for(AHTS) > 4 * site.distance_for(CTV)
+
+    def test_single_distance_construction_still_works(self):
+        """The old one-distance form must be unchanged for every vessel.
+
+        Most of this file builds sites that way, and the fallback is what lets
+        the two coexist.
+        """
+        site = SiteLogistics(distance_km=75.0)
+        assert site.distance_for(AHTS) == 75.0
+        assert site.distance_for(CTV) == 75.0
+        assert site.port_for(AHTS) == site.port_name
+
+    def test_correct_basing_shortens_the_required_window(self):
+        """The point of the fix: a shorter transit needs a shorter calm spell.
+
+        Long windows are disproportionately rarer than short ones, so this is
+        the channel through which the port assumption reached downtime.
+        """
+        station = NDBC_STATIONS["46087"]
+        correct = site_logistics(station.latitude, station.longitude)
+        single_port = SiteLogistics(distance_km=correct.distance_for(AHTS))
+
+        operation = [op for op in ANNUAL_OPERATIONS if "Unscheduled" in op.name][0]
+        assert window_hours_required(
+            operation, correct.distance_for(operation.vessel)
+        ) < window_hours_required(operation, single_port.distance_km)
+
+    def test_downtime_falls_when_vessels_are_based_correctly(self):
+        hs = make_hs(mean=2.2, seed=11)
+        station = NDBC_STATIONS["46087"]
+        correct = site_logistics(station.latitude, station.longitude)
+        single_port = SiteLogistics(distance_km=183.4, water_depth_m=correct.water_depth_m)
+
+        assert downtime_fraction(hs, correct) < downtime_fraction(hs, single_port)
+
+    def test_evaluate_site_reports_both_distances(self):
+        hs = make_hs(seed=5)
+        flux = 490.0 * hs**2 * 8.0
+        station = NDBC_STATIONS["46087"]
+        site = site_logistics(station.latitude, station.longitude)
+
+        result = evaluate_site(hs, flux, site)
+        assert result["distance_km"] == pytest.approx(site.distance_for(AHTS))
+        assert result["service_distance_km"] < result["distance_km"]
+
+    def test_great_circle_matches_known_separation(self):
+        # One degree of latitude is ~111.2 km anywhere on the globe.
+        assert great_circle_km(47.0, -124.0, 48.0, -124.0) == pytest.approx(111.2, abs=0.5)
+        assert great_circle_km(47.0, -124.0, 47.0, -124.0) == 0.0
+
+
+class TestUnservicableSites:
+    """A site too rough to service must be the worst case, not the best.
+
+    ``expected_waiting_hours`` returns NaN when the record holds no window long
+    enough to do the job at all. Every consumer used to coerce that to a zero
+    wait, so the least accessible possible site scored as perfectly
+    accessible. The bug was invisible on the real buoy records - windows exist
+    at all three - and only surfaced when a shorter required window made the
+    comparison site cross the threshold in the opposite direction.
+    """
+
+    @staticmethod
+    def _brutal_hs():
+        # Never below any vessel's working limit, so no window ever opens.
+        index = pd.date_range("2016-01-01", periods=24 * 365 * 2, freq="1h")
+        return pd.Series(np.full(len(index), 6.0), index=index)
+
+    def test_no_window_means_total_downtime(self):
+        assert downtime_fraction(self._brutal_hs(), SiteLogistics(distance_km=60)) == 1.0
+
+    def test_unservicable_is_worse_than_merely_difficult(self):
+        """The ordering that the NaN-to-zero coercion inverted."""
+        difficult = make_hs(mean=3.0, amplitude=1.5, seed=7)
+        impossible = self._brutal_hs()
+        site = SiteLogistics(distance_km=60)
+
+        assert downtime_fraction(impossible, site) >= downtime_fraction(difficult, site)
+
+    def test_unservicable_site_is_not_cheaper(self):
+        difficult = make_hs(mean=3.0, amplitude=1.5, seed=7)
+        site = SiteLogistics(distance_km=60)
+
+        impossible_cost = annual_om_cost(self._brutal_hs(), site)["total_annual_usd"]
+        difficult_cost = annual_om_cost(difficult, site)["total_annual_usd"]
+        assert impossible_cost >= difficult_cost
+
+    def test_charged_wait_is_capped_not_infinite(self):
+        """Finite cost, so the model stays comparable across sites."""
+        detail = annual_om_cost(self._brutal_hs(), SiteLogistics(distance_km=60))["detail"]
+        assert (detail["charged_wait_hours"] <= DEFAULT_STANDBY_CAP_HOURS).all()
+        assert np.isfinite(detail["annual_usd"]).all()
+
+    def test_evaluate_site_survives_an_unservicable_record(self):
+        hs = self._brutal_hs()
+        result = evaluate_site(hs, 490.0 * hs**2 * 8.0, SiteLogistics(distance_km=60))
+        assert result["downtime_fraction"] == 1.0
+        assert result["delivered_annual_usd"] == pytest.approx(0.0)
+        assert np.isfinite(result["net_annual_usd"])
+
+
+class TestWaitsAcrossDataGaps:
+    """Neither an outage nor a dropout is waiting time - but they differ.
+
+    Two opposite errors were made here, and the tests below pin both.
+
+    Counting every unobserved hour as waiting priced buoy 46087's missing 2021
+    as a year of bad weather: it reported a 1,900 h wait while being the most
+    accessible of the three sites, needing the shortest window and offering
+    the most windows per year.
+
+    Censoring on *every* missing hour is the opposite error: it discards the
+    long waits that the mean is mostly made of.
+
+    A third bug sat underneath both and made the evidence for them unreadable.
+    _epoch_ns divided by nanoseconds per hour while reading an index stored in
+    microseconds, so every duration on the real records was 1000x too small -
+    including the gap durations these tests are about. The censoring machinery
+    was being measured through the arithmetic it was meant to correct. See
+    TestDatetimeResolutionIndependence.
+
+    None of the three failed a test. Each was caught by an output being
+    impossible: an outage priced as weather, a wait shorter than the job, a
+    nine-year record whose longest wait was 7.3 hours.
+    """
+
+    @staticmethod
+    def _seasonal_hs():
+        """Windows almost only in summer, as on this coast."""
+        rng = np.random.default_rng(0)
+        index = pd.date_range("2015-01-01", "2023-12-31 23:00", freq="1h", tz="UTC")
+        return pd.Series(
+            np.clip(
+                2.3
+                - 1.3 * np.cos(2 * np.pi * (index.dayofyear - 200) / 365.25)
+                + rng.gamma(2, 0.28, len(index))
+                - 0.55,
+                0.15,
+                None,
+            ),
+            index=index,
+        )
+
+    @classmethod
+    def _dropouts_in_rough_weather(cls):
+        """Dropouts placed only where the sea was already unworkable.
+
+        This isolates the wait calculation from the window calculation: an
+        unworkable hour and a missing hour are equally unusable to
+        find_windows, so the window set is provably identical to the intact
+        record and any change in the wait comes from the wait code alone.
+        """
+        rng = np.random.default_rng(1)
+        base = cls._seasonal_hs()
+        masked = base.copy()
+        masked[(base > 2.5) & (rng.random(len(base)) < 0.30)] = np.nan
+        return base, masked
+
+    def test_scattered_dropouts_leave_the_window_set_untouched(self):
+        """Precondition for the test below; asserted so it cannot rot."""
+        base, masked = self._dropouts_in_rough_weather()
+        intact = find_windows(base, 1.75, 28.5)
+        dropped = find_windows(masked, 1.75, 28.5)
+        assert len(intact) == len(dropped)
+        assert (intact["start"].values == dropped["start"].values).all()
+
+    def test_scattered_dropouts_do_not_collapse_the_wait(self):
+        """The over-correction. Without bridging this returned 28 h, not 2,724."""
+        base, masked = self._dropouts_in_rough_weather()
+        assert expected_waiting_hours(masked, 1.75, 28.5) == pytest.approx(
+            expected_waiting_hours(base, 1.75, 28.5), rel=0.05
+        )
+
+    def test_scattered_dropouts_do_not_censor_everything(self):
+        _, masked = self._dropouts_in_rough_weather()
+        # Unbridged this was 0.80.
+        assert window_statistics(masked, 1.75, 28.5)["censored_fraction"] < 0.20
+
+    def test_year_long_outage_is_not_counted_as_waiting(self):
+        """The original bug, in the form the real record takes.
+
+        load_station resamples onto a regular hourly grid, so an outage is a
+        block of NaN rows and the index never skips.
+        """
+        intact = self._seasonal_hs()
+        blanked = intact.copy()
+        blanked[
+            (blanked.index >= "2021-01-01") & (blanked.index < "2022-01-01")
+        ] = np.nan
+
+        bridged_everything = expected_waiting_hours(
+            blanked, 1.75, 28.5, max_gap_hours=float("inf")
+        )
+        correct = expected_waiting_hours(blanked, 1.75, 28.5)
+
+        assert bridged_everything > correct
+        # Deleting observations must not make the site look worse.
+        assert correct <= expected_waiting_hours(intact, 1.75, 28.5) * 1.05
+
+    def test_tolerance_is_actually_reachable(self):
+        """Guards a trap this module walked into once already.
+
+        max_gap_hours is a default argument, so it binds at definition time. A
+        caller rebinding the module-level DEFAULT_MAX_GAP_HOURS changes
+        nothing - the same failure mode as the sensitivity analysis that
+        rebound ANNUAL_OPERATIONS and silently returned baseline numbers for
+        every scenario. The parameter must be threaded, and this fails if it
+        stops being.
+        """
+        _, masked = self._dropouts_in_rough_weather()
+        strict = window_statistics(masked, 1.75, 28.5, max_gap_hours=0.0)
+        lenient = window_statistics(masked, 1.75, 28.5, max_gap_hours=24.0)
+        assert strict["expected_wait_hours"] != lenient["expected_wait_hours"]
+        assert strict["censored_fraction"] > lenient["censored_fraction"]
+
+    def test_index_gaps_break_a_run_too(self):
+        intact = self._seasonal_hs()
+        removed = intact[
+            ~((intact.index >= "2021-01-01") & (intact.index < "2022-01-01"))
+        ]
+        assert expected_waiting_hours(removed, 1.75, 28.5) <= (
+            expected_waiting_hours(intact, 1.75, 28.5) * 1.05
+        )
+
+    def test_censoring_rises_when_windows_are_scarce(self):
+        hs = self._seasonal_hs()
+        easy = window_statistics(hs, 1.75, 12.0)["censored_fraction"]
+        hard = window_statistics(hs, 1.75, 240.0)["censored_fraction"]
+        assert hard > easy
+
+
+class TestCensoredButServicable:
+    """A fragmented record must not be mistaken for an unservicable site.
+
+    Censoring waits at the end of each run of observation raised the question
+    of whether the expected wait could come back NaN while windows exist -
+    which, read as "no window exists", would charge a site full downtime for
+    its own sensor outages and punish exactly the buoys whose records are
+    patchiest. It cannot happen, and the test below is what establishes that,
+    so no fallback is needed for the case.
+    """
+
+    def test_windows_present_always_yield_a_finite_wait(self):
+        """The invariant that makes an 'all censored' fallback unnecessary.
+
+        Every window contains at least its own start timestep, and timesteps
+        inside a window are assigned a zero wait.
+        """
+        rng = np.random.default_rng(4)
+        for fragment_days, threshold, required in (
+            (4, 1.75, 12.0),
+            (7, 1.75, 24.0),
+            (3, 1.5, 8.0),
+        ):
+            index = pd.date_range("2016-01-01", periods=24 * 700, freq="1h", tz="UTC")
+            hs = pd.Series(
+                np.clip(1.9 + rng.normal(0, 0.6, len(index)), 0.1, None), index=index
+            )
+            day = (index - index[0]).days
+            hs[day % fragment_days != 0] = np.nan
+
+            stats = window_statistics(hs, threshold, required)
+            if stats["n_windows"]:
+                assert np.isfinite(stats["expected_wait_hours"]), (
+                    f"{stats['n_windows']} windows but a NaN wait "
+                    f"({fragment_days=}, {threshold=}, {required=})"
+                )
+
+    def test_truly_windowless_record_is_unservicable(self):
+        index = pd.date_range("2016-01-01", periods=24 * 400, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(len(index), 6.0), index=index)
+        assert window_statistics(hs, 1.75, 12.0)["n_windows"] == 0
+        assert downtime_fraction(hs, SiteLogistics(distance_km=40)) == 1.0
+
+    def test_short_runs_that_cannot_fit_the_job_are_unservicable(self):
+        """A record chopped into 24 h pieces cannot support a 32 h job.
+
+        Correct, and worth pinning: it is the honest reading of the record
+        rather than an artifact. find_windows refuses to assert that an
+        unobserved stretch was calm.
+        """
+        index = pd.date_range("2016-01-01", periods=24 * 700, freq="1h", tz="UTC")
+        hs = pd.Series(np.full(len(index), 0.5), index=index)
+        day = (index - index[0]).days
+        hs[day % 4 != 0] = np.nan
+
+        assert window_statistics(hs, 1.75, 32.0)["n_windows"] == 0
+        assert window_statistics(hs, 1.75, 12.0)["n_windows"] > 0
+
+
+@pytest.mark.parametrize("unit", ["ns", "us", "ms"])
+class TestDatetimeResolutionIndependence:
+    """Results must not depend on the index's datetime resolution.
+
+    Every duration in this module was computed by reading `.asi8` and dividing
+    by nanoseconds per hour. `.asi8` returns the raw int64 in the index's *own*
+    unit, and pandas 3 parses text dates to microseconds while `pd.date_range`
+    produces nanoseconds. So the real NDBC records were 1000x off and every
+    synthetic fixture in this file was exactly right - the bug was invisible to
+    the entire suite by construction.
+
+    It surfaced as a maximum waiting time of 7.3 hours across a nine-year
+    record at a site reachable 41% of the time. Parametrising over the unit is
+    what makes it impossible to reintroduce.
+    """
+
+    @staticmethod
+    def _series(unit):
+        rng = np.random.default_rng(0)
+        n = 8760 * 3
+        index = pd.date_range("2016-01-01", periods=n, freq="1h", tz="UTC")
+        values = np.clip(
+            2.0
+            - 1.0 * np.cos(2 * np.pi * np.arange(n) / 8766 + np.pi)
+            + rng.gamma(2, 0.25, n)
+            - 0.4,
+            0.1,
+            None,
+        )
+        return pd.Series(values, index=index.as_unit(unit))
+
+    def test_window_statistics_match_nanosecond_reference(self, unit):
+        reference = window_statistics(self._series("ns"), 1.75, 36.8)
+        actual = window_statistics(self._series(unit), 1.75, 36.8)
+        for key, expected in reference.items():
+            if isinstance(expected, float) and np.isnan(expected):
+                assert np.isnan(actual[key]), key
+            else:
+                assert actual[key] == pytest.approx(expected), key
+
+    def test_wait_is_on_a_plausible_scale(self, unit):
+        """Independent of the reference: an absolute sanity bound.
+
+        A site reachable ~40% of the time, needing a 36.8 h window, cannot
+        have a mean wait of a few hours. Reading the unit wrongly gave 0.7 h.
+        """
+        stats = window_statistics(self._series(unit), 1.75, 36.8)
+        assert stats["n_windows"] > 0
+        assert stats["expected_wait_hours"] > 24.0
+
+    def test_downtime_matches_nanosecond_reference(self, unit):
+        site = SiteLogistics(distance_km=70)
+        assert downtime_fraction(self._series(unit), site) == pytest.approx(
+            downtime_fraction(self._series("ns"), site)
+        )
+
+
+class TestArrayScaling:
+    """An array shares some costs and multiplies others.
+
+    The whole argument for building more than one device rests on which is
+    which, so the split is asserted rather than assumed.
+    """
+
+    def test_single_device_is_unchanged(self):
+        assert scale_operations(ANNUAL_OPERATIONS, 1) == ANNUAL_OPERATIONS
+
+    def test_breakdowns_scale_in_frequency_not_duration(self):
+        scaled = scale_operations(ANNUAL_OPERATIONS, 10)
+        original = [op for op in ANNUAL_OPERATIONS if op.per_device][0]
+        after = [op for op in scaled if op.per_device][0]
+        assert after.per_year == pytest.approx(10 * original.per_year)
+        assert after.on_site_hours == original.on_site_hours
+
+    def test_campaigns_scale_in_duration_then_trips(self):
+        original = [op for op in ANNUAL_OPERATIONS if not op.per_device][0]
+
+        four = [o for o in scale_operations(ANNUAL_OPERATIONS, 4) if not o.per_device][0]
+        assert four.on_site_hours == pytest.approx(4 * original.on_site_hours)
+        assert four.per_year == pytest.approx(original.per_year)
+
+        # Beyond the campaign limit it is extra trips, not a longer window.
+        ten = [o for o in scale_operations(ANNUAL_OPERATIONS, 10) if not o.per_device][0]
+        assert ten.on_site_hours == four.on_site_hours
+        assert ten.per_year == pytest.approx(3 * original.per_year)
+
+    def test_campaign_window_does_not_grow_without_bound(self):
+        """The self-limiting part: a longer campaign needs a rarer window."""
+        big = scale_operations(ANNUAL_OPERATIONS, 100)
+        for operation in big:
+            assert window_hours_required(operation, 70.0) < 24 * 7
+
+    def test_rejects_nonsense_sizes(self):
+        with pytest.raises(ValueError):
+            scale_operations(ANNUAL_OPERATIONS, 0)
+        with pytest.raises(ValueError):
+            scale_operations(ANNUAL_OPERATIONS, 5, devices_per_campaign=0)
+
+    def test_om_per_device_falls_with_array_size(self):
+        """The reason to build an array at all."""
+        hs = make_hs(seed=21)
+        site = SiteLogistics(distance_km=70)
+        one = evaluate_site(hs, 490.0 * hs**2 * 8.0, site, n_devices=1)
+        ten = evaluate_site(hs, 490.0 * hs**2 * 8.0, site, n_devices=10)
+        assert ten["om_per_device_usd"] < one["om_annual_usd"]
+
+    def test_downtime_is_per_device_not_multiplied_by_the_array(self):
+        """A device is not down more often because it has neighbours."""
+        hs = make_hs(seed=22)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=70)
+        one = evaluate_site(hs, flux, site, n_devices=1)
+        twenty = evaluate_site(hs, flux, site, n_devices=20)
+        assert twenty["downtime_fraction"] == pytest.approx(one["downtime_fraction"])
+
+    def test_energy_and_device_capex_scale_linearly(self):
+        hs = make_hs(seed=23)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=70)
+        one = evaluate_site(hs, flux, site, n_devices=1)
+        five = evaluate_site(hs, flux, site, n_devices=5)
+        assert five["annual_energy_mwh"] == pytest.approx(
+            5 * one["annual_energy_mwh"]
+        )
+
+
+class TestBreakeven:
+    @staticmethod
+    def _case(n_devices=1):
+        hs = make_hs(seed=31)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=70)
+        return hs, flux, site, weather_profile(hs, site, n_devices)
+
+    def test_fast_path_agrees_with_evaluate_site(self):
+        """A fast path that quietly disagrees with the slow one is worse than none."""
+        for n in (1, 5):
+            hs, flux, site, profile = self._case(n)
+            fast = net_annual_usd(profile, flux, hs, DeviceSpec(), MarketSpec())
+            slow = evaluate_site(hs, flux, site, n_devices=n)
+            assert fast["net_annual_usd"] == pytest.approx(slow["net_annual_usd"])
+            assert fast["annual_energy_mwh"] == pytest.approx(
+                slow["annual_energy_mwh"]
+            )
+            assert fast["om_annual_usd"] == pytest.approx(slow["om_annual_usd"])
+
+    def test_breakeven_price_zeroes_the_net(self):
+        hs, flux, site, profile = self._case()
+        device = DeviceSpec()
+        price = breakeven_price_usd_per_mwh(profile, flux, hs, device)
+        result = net_annual_usd(
+            profile, flux, hs, device, MarketSpec(energy_price_usd_per_mwh=price)
+        )
+        assert result["net_annual_usd"] == pytest.approx(0.0, abs=1.0)
+
+    def test_breakeven_capex_zeroes_the_net(self):
+        from dataclasses import replace
+
+        hs, flux, site, profile = self._case()
+        device = DeviceSpec()
+        capex = breakeven_device_capex_usd(profile, flux, hs, device, MarketSpec())
+        result = net_annual_usd(
+            profile, flux, hs, replace(device, capex_usd=capex), MarketSpec()
+        )
+        assert result["net_annual_usd"] == pytest.approx(0.0, abs=1.0)
+
+    def test_negative_breakeven_capex_is_reported_not_clipped(self):
+        """Operating cost above revenue is a real answer, not an error."""
+        hs = make_hs(mean=4.0, seed=32)
+        flux = 490.0 * hs**2 * 8.0
+        site = SiteLogistics(distance_km=250)
+        profile = weather_profile(hs, site, 1)
+        capex = breakeven_device_capex_usd(
+            profile, flux, hs, DeviceSpec(capture_width_m=1.0), MarketSpec(
+                energy_price_usd_per_mwh=5.0
+            )
+        )
+        assert capex < 0
+
+    def test_array_sweep_shape_and_monotonicity(self):
+        hs = make_hs(seed=33)
+        flux = 490.0 * hs**2 * 8.0
+        sweep = array_sweep(hs, flux, SiteLogistics(distance_km=70), (1, 5, 10))
+        assert list(sweep.index) == [1, 5, 10]
+        # Sharing campaigns and mobilisation must reduce per-device O&M.
+        assert sweep["om_per_device_$k"].is_monotonic_decreasing
+
+    def test_breakeven_surface_rises_with_width_and_price(self):
+        hs = make_hs(seed=34)
+        flux = 490.0 * hs**2 * 8.0
+        surface = breakeven_surface(
+            hs, flux, SiteLogistics(distance_km=70),
+            capture_widths=(10, 20), prices=(60, 240),
+        )
+        assert surface.loc[20, "$60/MWh"] > surface.loc[10, "$60/MWh"]
+        assert surface.loc[10, "$240/MWh"] > surface.loc[10, "$60/MWh"]
