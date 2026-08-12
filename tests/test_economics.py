@@ -10,13 +10,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.economics.accessibility import (
-    accessible_fraction,
-    expected_waiting_hours,
-    find_windows,
-    seasonal_accessibility,
-    window_statistics,
-)
 from src.config import (
     NDBC_STATIONS,
     PORT_CLASS_HEAVY,
@@ -25,6 +18,13 @@ from src.config import (
     Port,
     great_circle_km,
     nearest_port,
+)
+from src.economics.accessibility import (
+    accessible_fraction,
+    expected_waiting_hours,
+    find_windows,
+    seasonal_accessibility,
+    window_statistics,
 )
 from src.economics.breakeven import (
     array_sweep,
@@ -37,14 +37,14 @@ from src.economics.breakeven import (
 from src.economics.deployment import (
     AHTS,
     ANNUAL_OPERATIONS,
-    scale_operations,
     CTV,
     DEFAULT_STANDBY_CAP_HOURS,
     SiteLogistics,
-    site_logistics,
     false_start_multiplier,
     mooring_capex,
     operation_cost,
+    scale_operations,
+    site_logistics,
     transit_hours,
     window_hours_required,
 )

@@ -174,9 +174,9 @@ def _bridged_observation(hs: pd.Series, max_gap_hours: float) -> np.ndarray:
         times[np.minimum(ends, n - 1)] - times[np.maximum(starts - 1, 0)]
     ) / 3.6e12
 
+    short_enough = flanked & (span_hours <= max_gap_hours)
     bridged = observed.copy()
-    for start, end in zip(starts[flanked & (span_hours <= max_gap_hours)],
-                          ends[flanked & (span_hours <= max_gap_hours)]):
+    for start, end in zip(starts[short_enough], ends[short_enough], strict=True):
         bridged[start:end] = True
     return bridged
 

@@ -26,7 +26,6 @@ import pandas as pd
 from src.economics.accessibility import window_statistics
 from src.economics.deployment import (
     ANNUAL_OPERATIONS,
-    scale_operations,
     DEFAULT_STANDBY_CAP_HOURS,
     DEPLOYMENT_OPERATIONS,
     RETRIEVAL_OPERATIONS,
@@ -34,6 +33,7 @@ from src.economics.deployment import (
     false_start_multiplier,
     mooring_capex,
     operation_cost,
+    scale_operations,
     window_hours_required,
 )
 
