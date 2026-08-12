@@ -25,6 +25,34 @@ from src.models.trees import HAS_LIGHTGBM
 BUOY_ONLY_MODELS = [m for m in available_models() if m not in NWP_MODELS]
 
 
+def _model_param(name: str):
+    """Parametrise a model, skipping it when its optional backend is absent.
+
+    The registry advertises the LightGBM models whether or not LightGBM is
+    installed - ``get_model`` raises a helpful ImportError at instantiation
+    instead. That is the right behaviour for the registry and the wrong
+    behaviour for a parametrised contract test, which cannot skip from inside
+    the test body once the parameter list is built.
+
+    It matters because running without LightGBM is a supported configuration,
+    not a broken one: LightGBM lives in requirements-ml.txt, and CI's `pinned`
+    job installs only requirements.txt. Without this the contract suite
+    reported twelve failures for a dependency the core install is not meant to
+    have - noise that would have to be triaged on every run.
+    """
+    needs_lightgbm = "lightgbm" in name
+    return pytest.param(
+        name,
+        marks=pytest.mark.skipif(
+            needs_lightgbm and not HAS_LIGHTGBM,
+            reason="lightgbm not installed (it is an ML extra, not a core dependency)",
+        ),
+    )
+
+
+BUOY_ONLY_PARAMS = [_model_param(m) for m in BUOY_ONLY_MODELS]
+
+
 @pytest.fixture(scope="module")
 def supervised():
     """A small but realistic (X, y) pair at a 6-hour horizon."""
@@ -46,7 +74,7 @@ def supervised():
     return make_supervised(features, observations["WVHT"], horizon=6)
 
 
-@pytest.mark.parametrize("name", BUOY_ONLY_MODELS)
+@pytest.mark.parametrize("name", BUOY_ONLY_PARAMS)
 class TestForecasterContract:
     """Applied to every model in the registry."""
 
