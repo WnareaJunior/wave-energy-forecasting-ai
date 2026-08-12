@@ -3,7 +3,9 @@
 Written so this project can be picked up cold, in a new session, without
 re-deriving anything. Last updated at commit `0956281`.
 
-Everything lives on branch **`claude/forecasting-model-architecture-s5180n`**.
+Everything lives on branch **`claude/forecasting-model-architecture-s5180n`**,
+open as **[PR #6](https://github.com/WnareaJunior/wave-energy-forecasting-ai/pull/6)**.
+Pushing to the branch updates that PR — do not open a second one.
 
 ---
 
