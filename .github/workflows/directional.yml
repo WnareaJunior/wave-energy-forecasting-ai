@@ -1,0 +1,116 @@
+name: Directional error structure
+
+# Tests the explanation offered for Track B's one positive result.
+#
+# Postprocessing GEFS helps at 46087 (+14.5% at +12 h) and not at the two
+# open-coast buoys. The story was that a 0.25 degree grid cannot resolve the
+# entrance to the Strait of Juan de Fuca, so the model's error there is
+# systematic and learnable. This asks whether that error carries the
+# directional signature such an explanation requires.
+#
+# A refutation is a perfectly good outcome and is reported as one: the script
+# names which station actually has the most directionally structured error,
+# whether or not it is the one the story predicts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      stations:
+        description: "Comma-separated NDBC stations"
+        required: false
+        default: "46041,46087,46029"
+        type: string
+      years:
+        description: "Year range; the reforecast ends in 2019"
+        required: false
+        default: "2015-2019"
+        type: string
+      stride:
+        description: "Take every Nth daily cycle (higher = fewer downloads)"
+        required: false
+        default: "4"
+        type: string
+      horizon:
+        description: "Lead time in hours to stratify at"
+        required: false
+        default: "12"
+        type: string
+
+  push:
+    branches:
+      - claude/why-postprocessing-works-at-neah-bay
+    paths:
+      - "src/eval/directional.py"
+      - "experiments/directional_error.py"
+      - ".github/workflows/directional.yml"
+
+permissions:
+  contents: read
+
+env:
+  STATIONS: ${{ inputs.stations || '46041,46087,46029' }}
+  YEARS: ${{ inputs.years || '2015-2019' }}
+  STRIDE: ${{ inputs.stride || '4' }}
+  HORIZON: ${{ inputs.horizon || '12' }}
+  # Single-threaded, single-process reads; the lock buys nothing and misbehaves
+  # on some runner mounts.
+  HDF5_USE_FILE_LOCKING: "FALSE"
+
+jobs:
+  directional:
+    name: Stratify GEFS error by wave direction
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-pilot.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-pilot.txt
+          pip install boto3 xarray netCDF4
+
+      - name: Check data sources are reachable
+        run: |
+          python - <<'PY'
+          import sys
+          import boto3, requests
+          from botocore import UNSIGNED
+          from botocore.config import Config
+
+          try:
+              r = requests.get(
+                  "https://www.ndbc.noaa.gov/data/historical/stdmet/46041h2016.txt.gz",
+                  timeout=30, stream=True,
+              )
+              r.close()
+              assert r.ok, f"HTTP {r.status_code}"
+          except Exception as e:
+              sys.exit(f"cannot reach ndbc.noaa.gov: {e}")
+
+          s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
+          try:
+              s3.list_objects_v2(
+                  Bucket="noaa-nws-gefswaves-reforecast-pds", MaxKeys=1
+              )
+          except Exception as e:
+              sys.exit(f"cannot reach the GEFS bucket: {e}")
+          print("both sources reachable")
+          PY
+
+      # The exit code matters: an earlier exploration script in this repo went
+      # green having learned nothing because main() returned 0 regardless.
+      - name: Run
+        run: |
+          python experiments/directional_error.py \
+            --stations "$STATIONS" \
+            --years "$YEARS" \
+            --stride "$STRIDE" \
+            --horizon "$HORIZON"
