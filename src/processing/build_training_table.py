@@ -153,7 +153,8 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
 
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
-    s3 = boto3.client("s3")
+    # WAVE_S3_ENDPOINT → MinIO on the devbox for local runs; unset → AWS.
+    s3 = boto3.client("s3", endpoint_url=os.environ.get("WAVE_S3_ENDPOINT"))
     static = xr.open_dataset(fetch(
         s3, OUT_BUCKET, STATIC_KEY,
         os.path.join(LOCAL_TEMP_DIR, os.path.basename(STATIC_KEY))))

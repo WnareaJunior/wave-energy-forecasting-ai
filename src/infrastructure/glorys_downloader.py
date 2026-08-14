@@ -130,7 +130,8 @@ def main():
                         format="%(asctime)s %(levelname)s %(message)s")
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
 
-    s3 = boto3.client("s3")
+    # WAVE_S3_ENDPOINT → MinIO on the devbox for local runs; unset → AWS.
+    s3 = boto3.client("s3", endpoint_url=os.environ.get("WAVE_S3_ENDPOINT"))
     completed = completed_from_s3(s3)
     pending = [y for y in YEARS if output_name(y) not in completed]
 

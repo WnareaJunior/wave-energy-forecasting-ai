@@ -234,7 +234,9 @@ def main():
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
 
     src = boto3.client("s3", config=Config(signature_version=UNSIGNED))
-    dst = boto3.client("s3")
+    # Destination honors WAVE_S3_ENDPOINT (MinIO locally); the source stays
+    # on real AWS — the public NOAA bucket only exists there.
+    dst = boto3.client("s3", endpoint_url=os.environ.get("WAVE_S3_ENDPOINT"))
 
     days = list_source_days(src)
     completed = completed_from_s3(dst)

@@ -1,3 +1,5 @@
+import os
+
 import boto3
 import json
 from botocore.exceptions import ClientError
@@ -6,7 +8,7 @@ def create_panthalassa_buckets():
     """
     Create S3 buckets for Panthalassa ocean forecasting project
     """
-    s3 = boto3.client('s3', region_name='us-east-2')
+    s3 = boto3.client('s3', region_name='us-east-2', endpoint_url=os.environ.get('WAVE_S3_ENDPOINT'))
     
     bucket_configs = [
         {
@@ -58,7 +60,7 @@ def configure_bucket_policies():
     """
     Set up bucket policies for data access
     """
-    s3 = boto3.client('s3')
+    s3 = boto3.client('s3', endpoint_url=os.environ.get('WAVE_S3_ENDPOINT'))
     
     # Example policy for allowing EC2 instances access
     bucket_policy = {
@@ -80,7 +82,7 @@ def list_bucket_contents():
     """
     Utility function to check bucket contents
     """
-    s3 = boto3.client('s3')
+    s3 = boto3.client('s3', endpoint_url=os.environ.get('WAVE_S3_ENDPOINT'))
     
     buckets = [
         'panthalassa-ocean-raw-data',

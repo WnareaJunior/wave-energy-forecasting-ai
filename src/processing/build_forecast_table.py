@@ -244,7 +244,8 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
-    s3 = boto3.client("s3")
+    # WAVE_S3_ENDPOINT → MinIO on the devbox for local runs; unset → AWS.
+    s3 = boto3.client("s3", endpoint_url=os.environ.get("WAVE_S3_ENDPOINT"))
 
     if args.sweep:
         sweep(s3, args.members)

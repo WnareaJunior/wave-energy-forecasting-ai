@@ -71,6 +71,18 @@ A daily **EventBridge-scheduled sweep** (12:00 UTC) launches a self-terminating 
 - All infrastructure is scripted in `src/infrastructure/` (boto3 + AWS CLI); every backfill derives resume state from S3, so any job can be killed and relaunched idempotently
 - Stack: Python, xarray, cfgrib, pandas, PyArrow; XGBoost for modeling
 
+### Local mode — the devbox instead of AWS
+
+Set `WAVE_S3_ENDPOINT` (see `.env.example`) and every *destination* S3 write
+goes to MinIO on the home server, where the three `panthalassa-ocean-*`
+buckets already exist — no AWS bill for experiments. Source reads (the public
+NOAA/GEFS buckets) always hit real AWS regardless. The devbox also provides:
+
+- **GPU training** — RTX 4060 Ti via JupyterLab (`http://devbox:8890`) instead of EC2
+- **Experiment tracking** — MLflow at `http://devbox:5002`; scripts pick it up
+  through `MLFLOW_TRACKING_URI` (`mlflow` is in `requirements.txt`)
+- Processing jobs can run on the devbox directly (`ssh devbox`, 18 cores / 48 GB)
+
 ---
 
 ## 📜 License

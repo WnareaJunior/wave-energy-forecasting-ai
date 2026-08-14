@@ -171,7 +171,8 @@ def main():
         log.info("Dry run: skipping upload of s3://%s/%s",
                  BUCKET_NAME, OUTPUT_KEY)
         return
-    boto3.client("s3").upload_file(out_path, BUCKET_NAME, OUTPUT_KEY)
+    # WAVE_S3_ENDPOINT → MinIO on the devbox for local runs; unset → AWS.
+    boto3.client("s3", endpoint_url=os.environ.get("WAVE_S3_ENDPOINT")).upload_file(out_path, BUCKET_NAME, OUTPUT_KEY)
     log.info("Uploaded s3://%s/%s", BUCKET_NAME, OUTPUT_KEY)
 
 
